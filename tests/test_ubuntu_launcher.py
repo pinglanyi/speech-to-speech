@@ -3,6 +3,7 @@ import ast
 import importlib.util
 import io
 import os
+import sys
 import tempfile
 import unittest
 import urllib.error
@@ -72,6 +73,30 @@ class LauncherTests(unittest.TestCase):
 
     def test_profiles_have_separate_virtual_environments(self):
         self.assertNotEqual(self.launcher.venv_path("cpu"), self.launcher.venv_path("gpu"))
+
+    def test_model_downloads_default_to_mirror(self):
+        env = {}
+        self.launcher.configure_model_downloads(env)
+        self.assertEqual(env["HF_ENDPOINT"], "https://hf-mirror.com")
+        self.assertEqual(env["HF_HUB_DISABLE_XET"], "1")
+        self.assertEqual(env["S2S_PACKAGED_SILERO"], "1")
+
+    def test_model_mirror_can_be_overridden(self):
+        env = {"HF_ENDPOINT": "https://huggingface.co", "HF_HUB_DISABLE_XET": "0"}
+        self.launcher.configure_model_downloads(env)
+        self.assertEqual(env["HF_ENDPOINT"], "https://huggingface.co")
+        self.assertEqual(env["HF_HUB_DISABLE_XET"], "0")
+
+    def test_packaged_vad_does_not_download_from_github(self):
+        spec = importlib.util.spec_from_file_location("vad_loader", ROOT / "src/speech_to_speech/VAD/model_loader.py")
+        loader = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loader)
+        packaged = MagicMock()
+        torch = MagicMock()
+        with patch.dict(sys.modules, {"silero_vad": packaged, "torch": torch}), \
+             patch.dict(os.environ, {"S2S_PACKAGED_SILERO": "1"}):
+            self.assertIs(loader.load_silero_model(), packaged.load_silero_vad.return_value)
+            torch.hub.load.assert_not_called()
 
     def test_api_failure_does_not_echo_provider_payload(self):
         error = urllib.error.HTTPError("https://example.org", 401, "Unauthorized", {}, io.BytesIO(b"secret-canary"))

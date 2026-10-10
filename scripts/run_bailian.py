@@ -29,6 +29,13 @@ def venv_path(profile: str) -> Path:
     return ROOT / f".venv-{profile}"
 
 
+def configure_model_downloads(env) -> None:
+    # Set before spawning any process that imports huggingface_hub/Transformers.
+    env.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+    env.setdefault("HF_HUB_DISABLE_XET", "1")
+    env.setdefault("S2S_PACKAGED_SILERO", "1")
+
+
 def load_env(path: Path) -> None:
     if not path.exists():
         return
@@ -102,6 +109,7 @@ def install_requirements(profile: str) -> list[str]:
             deps.extend(project["optional-dependencies"][extra])
     # Browser HTTP adapter imports auth and limiter (optional HF OAuth).
     deps.append("huggingface-hub[oauth]>=0.34.0")
+    deps.append("silero-vad==5.1.2")
     return deps
 
 
@@ -235,6 +243,7 @@ def main(argv=None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="Print the credential-free pipeline configuration")
     args = parser.parse_args(argv)
     load_env(ROOT / ".env")
+    configure_model_downloads(os.environ)
     profile = "gpu" if args.gpu else "cpu" if args.cpu else os.environ.get("S2S_PROFILE", "auto")
     if profile == "auto":
         profile = "gpu" if shutil.which("nvidia-smi") and subprocess.run(

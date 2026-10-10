@@ -23,7 +23,20 @@ node --version
 npm --version
 ```
 
-GPU 版还需要可用的 NVIDIA 驱动，先确认 `nvidia-smi` 正常。脚本不安装或改动驱动。48GB 显存使用 GPU 配置；文字大模型不占用本地显存。首次联网安装依赖并下载 Hugging Face 模型，需要可访问 PyPI、npm 和 Hugging Face，预留充足磁盘空间。
+GPU 版还需要可用的 NVIDIA 驱动，先确认 `nvidia-smi` 正常。脚本不安装或改动驱动。48GB 显存使用 GPU 配置；文字大模型不占用本地显存。首次联网安装依赖并下载模型，需要可访问 PyPI、npm 和模型镜像，预留充足磁盘空间。
+
+### 模型下载镜像
+
+启动器默认在导入模型库前设置 `HF_ENDPOINT=https://hf-mirror.com`，GPU 和 CPU 两种配置的 Hugging Face Hub 模型下载均使用该镜像。同时默认设置 `HF_HUB_DISABLE_XET=1`，使用普通 HTTP 下载路径。环境变量优先于 `.env`，可以按需覆盖：
+
+```dotenv
+HF_ENDPOINT=https://hf-mirror.com
+HF_HUB_DISABLE_XET=1
+```
+
+如果镜像缺少某个模型或临时不可用，可更换 `HF_ENDPOINT`，例如改为 `https://huggingface.co`。模型会保存在 Hugging Face 默认缓存目录，重复启动复用缓存。为避免 Silero VAD 在启动时另行从 GitHub 下载模型，一键启动器安装 `silero-vad==5.1.2` 并加载包内自带的 VAD 权重（`S2S_PACKAGED_SILERO=1`）。识别、合成和 Smart Turn 的 Hub 模型使用镜像。
+
+镜像设置不改变百炼 API 地址，也不替代系统软件包、pip、npm、Git 仓库或 NLTK 资源的下载地址。使用方法参考：https://hf-mirror.com/ 。已有旧版虚拟环境会因新增依赖自动补装。
 
 ## 2. 下载 test 分支和配置 Key
 

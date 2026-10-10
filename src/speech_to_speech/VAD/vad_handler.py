@@ -20,6 +20,7 @@ from speech_to_speech.pipeline.queue_types import TextEventItem
 from speech_to_speech.pipeline.speaker_metadata import PendingSpeakerAttribution
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.utils import int2float
+from speech_to_speech.VAD.model_loader import load_silero_model
 from speech_to_speech.VAD.vad_iterator import VADIterator
 
 if TYPE_CHECKING:
@@ -151,12 +152,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 speech_pad_ms=speech_pad_ms,
             )
         elif vad == "silero":
-            self.model, _ = torch.hub.load(
-                "snakers4/silero-vad:master",
-                "silero_vad",
-                trust_repo=True,
-                skip_validation=True,
-            )
+            self.model = load_silero_model()
             self.iterator = VADIterator(
                 self.model,
                 threshold=thresh,
