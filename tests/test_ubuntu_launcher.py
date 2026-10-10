@@ -1,5 +1,6 @@
 """Launcher checks without installing models or making network requests."""
 import ast
+import builtins
 import importlib.util
 import io
 import os
@@ -19,6 +20,35 @@ class LauncherTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("launcher", ROOT / "scripts/run_bailian.py")
         cls.launcher = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.launcher)
+
+    def test_launcher_import_does_not_require_tomllib(self):
+        original_import = builtins.__import__
+
+        def without_tomllib(name, *args, **kwargs):
+            if name == "tomllib":
+                raise ModuleNotFoundError("No module named 'tomllib'")
+            return original_import(name, *args, **kwargs)
+
+        spec = importlib.util.spec_from_file_location("launcher_without_tomllib", ROOT / "scripts/run_bailian.py")
+        module = importlib.util.module_from_spec(spec)
+        with patch.object(builtins, "__import__", side_effect=without_tomllib):
+            spec.loader.exec_module(module)
+
+    def test_api_check_can_run_on_python_310(self):
+        with patch.object(self.launcher.sys, "version_info", (3, 10, 12)), \
+             patch.object(self.launcher, "check_api") as check, \
+             patch.object(self.launcher, "load_env"), \
+             patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(self.launcher.main(["--cpu", "--check-api"]), 0)
+            check.assert_called_once()
+
+    def test_old_python_gets_actionable_install_message(self):
+        with patch.object(self.launcher.sys, "version_info", (3, 10, 12)), \
+             patch.object(self.launcher.sys, "platform", "linux"), \
+             patch.object(self.launcher, "load_env"), \
+             patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(ValueError, "PYTHON_BIN=python3.11"):
+                self.launcher.main(["--cpu", "--install-only"])
 
     def test_gpu_configuration_is_chinese_and_uses_bailian(self):
         cfg = self.launcher.pipeline_config("gpu", {})

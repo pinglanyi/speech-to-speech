@@ -6,6 +6,8 @@
 
 推荐 **Ubuntu 24.04 + Python 3.12**。也支持已安装 Python 3.11 的 Ubuntu 22.04。脚本要求 Python 3.11/3.12；22.04 自带 Python 3.10 不适用，需要先自行安装 3.11 及对应 venv 包，再使用 `PYTHON_BIN=python3.11 bash run.sh`。
 
+入口会优先寻找 `python3.12`、其次 `python3.11`、最后 `python3`；可用 `PYTHON_BIN` 指定解释器。`--check-api`、`--dry-run` 和 `--help` 可以在 Python 3.10 运行，不需要 `tomllib`，但完整模型安装仍要求 3.11/3.12。若旧版报 `ModuleNotFoundError: No module named 'tomllib'`，先 `git pull --ff-only origin test` 更新，再运行 API 检查。不要改动系统 `/usr/bin/python3` 的链接。
+
 ```bash
 sudo apt update
 sudo apt install -y git python3 python3-venv python3-dev build-essential \

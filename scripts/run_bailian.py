@@ -16,7 +16,6 @@ import socket
 import subprocess
 import sys
 import time
-import tomllib
 import urllib.error
 import urllib.request
 import venv
@@ -100,6 +99,10 @@ def pipeline_config(profile: str, env: dict[str, str]) -> dict:
 
 
 def install_requirements(profile: str) -> list[str]:
+    # API checks/help also work on Python 3.10, which has no tomllib.
+    # Full installation validates Python 3.11/3.12 before reaching this code.
+    import tomllib
+
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     # This launcher deliberately uses the torch backend, avoiding the upstream
     # Linux GGML wheel's glibc 2.39 / CUDA 12.8 requirement on Ubuntu 22.04.
@@ -256,7 +259,12 @@ def main(argv=None) -> int:
         check_api(dict(os.environ))
         return 0
     if sys.platform != "linux" or not ((3, 11) <= sys.version_info[:2] < (3, 13)):
-        raise ValueError("Use Ubuntu with Python 3.11 or 3.12 (python3-venv installed).")
+        raise ValueError(
+            f"Python {sys.version_info[0]}.{sys.version_info[1]} is not supported for model installation. "
+            "Use Ubuntu with Python 3.11 or 3.12 and its venv package installed. "
+            "Then run: PYTHON_BIN=python3.11 bash run.sh --gpu (or python3.12). "
+            "See docs/ubuntu-bailian.md. --check-api does not require tomllib."
+        )
     demo = not args.no_demo
     if demo and not shutil.which("npm"):
         raise ValueError("Install Node.js 20+ and npm, or pass --no-demo.")
