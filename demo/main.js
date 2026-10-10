@@ -22,8 +22,8 @@ import { $, truncateError, DEBUG } from "./ui/dom.js";
 import { ChatView } from "./ui/chat.js";
 import { Account } from "./ui/account.js";
 
-const DEFAULT_VOICE = "Aiden";
-const DEFAULT_INSTRUCTIONS = "You are a friendly voice assistant.";
+const DEFAULT_VOICE = "Vivian";
+const DEFAULT_INSTRUCTIONS = "你是中文语音助手。请用简洁自然的中文回答，通常不超过三句话。";
 
 const STORAGE_KEYS = {
   // Direct s2s server URL, used only when the deploy has no LOAD_BALANCER_URL

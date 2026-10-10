@@ -1,0 +1,116 @@
+# Ubuntu 一键启动：百炼 + 中文语音
+
+此脚本使用 **venv**，不使用 Conda 或 Docker。百炼负责文字回答；语音识别和合成在服务器运行。网页在个人电脑上使用麦克风，不需要服务器声卡。
+
+## 1. 系统准备
+
+推荐 **Ubuntu 24.04 + Python 3.12**。也支持已安装 Python 3.11 的 Ubuntu 22.04。脚本要求 Python 3.11/3.12；22.04 自带 Python 3.10 不适用，需要先自行安装 3.11 及对应 venv 包，再使用 `PYTHON_BIN=python3.11 bash run.sh`。
+
+```bash
+sudo apt update
+sudo apt install -y git python3 python3-venv python3-dev build-essential \
+  ffmpeg libportaudio2 libsndfile1 curl ca-certificates
+python3 --version
+```
+
+网页需要 **Node.js 20+ 和 npm**。如果尚未安装，可通过 NodeSource 的 Node.js 22 源安装（会添加第三方软件源；也可以按组织规范安装 Node.js）：
+
+```bash
+curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource_setup.sh
+sudo bash /tmp/nodesource_setup.sh
+sudo apt install -y nodejs
+node --version
+npm --version
+```
+
+GPU 版还需要可用的 NVIDIA 驱动，先确认 `nvidia-smi` 正常。脚本不安装或改动驱动。48GB 显存使用 GPU 配置；文字大模型不占用本地显存。首次联网安装依赖并下载 Hugging Face 模型，需要可访问 PyPI、npm 和 Hugging Face，预留充足磁盘空间。
+
+## 2. 下载 test 分支和配置 Key
+
+```bash
+git clone --branch test git@github.com:pinglanyi/speech-to-speech.git
+cd speech-to-speech
+cp .env.example .env
+chmod 600 .env
+nano .env
+```
+
+服务器没有 GitHub SSH Key 时，clone 地址改为 `https://github.com/pinglanyi/speech-to-speech.git`。
+
+把百炼 Key 填入 `.env` 的 `DASHSCOPE_API_KEY=` 后面。**不要把真实 Key 放进脚本、命令行参数或提交记录。** `.env` 已被 Git 忽略；更换 Key 只需修改此文件。环境中已 export 的变量优先于 `.env`。
+
+默认：
+
+```dotenv
+DASHSCOPE_API_KEY=在此填写你的新Key
+DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+DASHSCOPE_MODEL=qwen-plus
+```
+
+默认地址为北京地域兼容接口。Key、模型、地域/业务空间地址必须匹配。如果控制台提供带业务空间 ID 的新地址，请将 `DASHSCOPE_BASE_URL` 改为控制台给出的完整基础地址（以 `/compatible-mode/v1` 结尾，不包含 `/chat/completions`）。国际地域使用其对应地址，不能混用 Key。
+
+先检查 API（会产生一次很短的模型调用，不安装模型）：
+
+```bash
+bash run.sh --check-api
+```
+
+显示 `Bailian API connection OK.` 后继续。401/403 检查 Key 和业务空间权限；404 检查地域地址和模型；429 检查额度、余额和限流。脚本不会打印 Key 或原始错误响应。
+
+## 3. 一键启动
+
+**48GB NVIDIA GPU：**
+
+```bash
+bash run.sh --gpu
+```
+
+使用 Qwen3-ASR 1.7B 识别中文，Qwen3-TTS CustomVoice 的 Vivian 音色合成中文。采用 PyTorch 后端，不要求上游 GGML 默认轮子的 Ubuntu 24.04/glibc 2.39/CUDA 12.8 组合。仍需可用的 PyTorch CUDA 和匹配驱动；必要时按 PyTorch 官方安装指引在 `.venv-gpu` 中安装匹配的 torch/torchaudio。
+
+**没有 GPU：**
+
+```bash
+bash run.sh --cpu
+```
+
+使用多语言 Faster Whisper `small` + CPU int8 识别中文，OmniVoice 在 CPU 用 float32 合成中文。OmniVoice 与当前项目的 Transformers 5 依赖兼容，不依赖 CUDA 图执行。此配置可用于功能测试；必须完成一段语音合成后才开始播放，可能明显慢于实时，延迟取决于 CPU。建议先预留 16GB 系统内存并观察实际占用。这是规划建议，未在目标服务器上测量。OmniVoice 预训练权重为 CC-BY-NC，不能用于商业用途。
+
+不指定选项会检测 `nvidia-smi`，成功则选择 GPU，否则选择 CPU。首次自动创建 `.venv-gpu` 或 `.venv-cpu`、安装依赖及网页组件，再启动后台语音服务和网页服务。两种环境相互隔离，CPU 环境优先安装 PyTorch CPU 轮子。后续启动复用虚拟环境和已下载模型。依赖跟随所下载提交的 pyproject.toml；不是跨时间的完整锁定环境。
+
+脚本仅在此虚拟环境安装模型依赖：把 `faster-qwen3-tts[ggml]` 替换为基础 `faster-qwen3-tts`，再用 `pip install --no-deps -e .` 注册当前源码，避免安装未使用的原生 GGML 扩展。CPU 版额外安装 `faster-whisper`、`omnivoice`，不修改上游默认安装方式。
+
+首次模型下载和预热可能耗时较长，默认等待 30 分钟，可修改 `.env` 的 `S2S_STARTUP_TIMEOUT`。启动失败会停止同一脚本管理的另一个服务；按 `Ctrl+C` 停止两个服务。
+
+其他命令：
+
+```bash
+bash run.sh --gpu --install-only  # 只准备环境，不需要 Key，不启动服务
+bash run.sh --cpu --no-demo       # 只启动语音后端，不需要 Node.js
+bash run.sh --gpu --reinstall    # 重装/更新依赖后启动
+bash run.sh --cpu --dry-run       # 查看不含 Key 的配置
+bash run.sh --help
+```
+
+## 4. 从个人电脑测试服务器
+
+两个服务均监听服务器回环地址。在**个人电脑**开一个终端建立隧道，保持连接：
+
+```bash
+ssh -N -L 7860:127.0.0.1:7860 -L 8765:127.0.0.1:8765 用户名@服务器IP
+```
+
+个人电脑浏览器打开 **http://localhost:7860**，允许麦克风，点击开始，用中文问问题。默认使用 WebSocket；本分支网页默认中文提示词和 Vivian 音色。如果浏览器以前保存过设置，会优先使用保存值，请在 Settings 中改回中文提示词和 Vivian。隧道必须同时转发两个端口：7860 是网页，8765 是浏览器直接连接的语音后端。浏览器访问 localhost 能使用麦克风；直接访问服务器普通 HTTP IP 地址通常不允许麦克风。
+
+建议戴耳机。依次测试：中文提问、中文播报、继续追问、播报中插话。网页地址显示不代表语音端到端通过，以实际听到回答为准。CPU 模式需要等待合成，不应按 GPU 延迟预期判断失败。
+
+如 `.env` 修改了端口，SSH 隧道和浏览器地址也要同步修改。端口已被占用时脚本会报错，不会自动结束其他进程。不要同时在同一工作目录启动多个实例。
+
+## 5. 验证范围
+
+启动器的自动化测试覆盖 GPU/CPU 配置、Key 不进入配置、环境变量优先级、`.env` 不执行 shell、依赖选择及 API 错误处理。不包含实际模型推理或目标 Ubuntu/CUDA 环境的端到端验证，最终需在服务器安装后测试。
+
+```bash
+python3 -m unittest discover -s tests -p test_ubuntu_launcher.py -v
+```
+
+百炼接口参考：https://www.alibabacloud.com/help/en/model-studio/model-calling-in-sub-workspace

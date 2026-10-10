@@ -1,0 +1,116 @@
+"""Launcher checks without installing models or making network requests."""
+import ast
+import importlib.util
+import io
+import os
+import tempfile
+import unittest
+import urllib.error
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class LauncherTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("launcher", ROOT / "scripts/run_bailian.py")
+        cls.launcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.launcher)
+
+    def test_gpu_configuration_is_chinese_and_uses_bailian(self):
+        cfg = self.launcher.pipeline_config("gpu", {})
+        self.assertEqual(cfg["stt"], "qwen3-asr")
+        self.assertEqual(cfg["qwen3_asr_language"], "zh")
+        self.assertEqual(cfg["qwen3_tts_backend"], "torch")
+        self.assertEqual(cfg["llm_backend"], "chat-completions")
+        self.assertIsNone(cfg["responses_api_reasoning_effort"])
+        self.assertFalse(cfg["responses_api_disable_thinking"])
+
+    def test_cpu_configuration_never_selects_cuda(self):
+        cfg = self.launcher.pipeline_config("cpu", {})
+        self.assertEqual(cfg["device"], "cpu")
+        self.assertEqual(cfg["faster_whisper_stt_compute_type"], "int8")
+        self.assertEqual(cfg["faster_whisper_stt_gen_language"], "zh")
+        self.assertEqual(cfg["tts"], "omnivoice")
+        self.assertEqual(cfg["omnivoice_dtype"], "float32")
+
+    def test_secret_is_not_in_configuration(self):
+        cfg = self.launcher.pipeline_config("gpu", {"DASHSCOPE_API_KEY": "secret-canary"})
+        self.assertNotIn("secret-canary", str(cfg))
+
+    def test_endpoint_and_model_can_be_overridden(self):
+        cfg = self.launcher.pipeline_config("cpu", {"DASHSCOPE_BASE_URL": "https://example.org/v1", "DASHSCOPE_MODEL": "custom"})
+        self.assertEqual(cfg["responses_api_base_url"], "https://example.org/v1")
+        self.assertEqual(cfg["model_name"], "custom")
+
+    def test_env_file_does_not_execute_shell(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as folder:
+            path = Path(folder) / ".env"
+            path.write_text('DASHSCOPE_API_KEY="$(touch forbidden)"\n# comment\nDASHSCOPE_MODEL=qwen-plus\n', encoding="utf-8")
+            with patch.dict(os.environ, {}, clear=True):
+                self.launcher.load_env(path)
+                self.assertEqual(os.environ["DASHSCOPE_API_KEY"], "$(touch forbidden)")
+
+    def test_existing_environment_takes_precedence(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as folder:
+            path = Path(folder) / ".env"
+            path.write_text("DASHSCOPE_MODEL=file-model\n", encoding="utf-8")
+            with patch.dict(os.environ, {"DASHSCOPE_MODEL": "exported-model"}, clear=True):
+                self.launcher.load_env(path)
+                self.assertEqual(os.environ["DASHSCOPE_MODEL"], "exported-model")
+
+    def test_missing_key_is_actionable(self):
+        with self.assertRaisesRegex(ValueError, "DASHSCOPE_API_KEY"):
+            self.launcher.require_key({})
+
+    def test_base_requirements_do_not_require_native_ggml(self):
+        deps = self.launcher.install_requirements("gpu")
+        self.assertFalse(any("[ggml]" in dep for dep in deps))
+        self.assertTrue(any(dep.startswith("faster-qwen3-tts") for dep in deps))
+
+    def test_profiles_have_separate_virtual_environments(self):
+        self.assertNotEqual(self.launcher.venv_path("cpu"), self.launcher.venv_path("gpu"))
+
+    def test_api_failure_does_not_echo_provider_payload(self):
+        error = urllib.error.HTTPError("https://example.org", 401, "Unauthorized", {}, io.BytesIO(b"secret-canary"))
+        with patch.object(self.launcher.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaises(ValueError) as result:
+                self.launcher.check_api({"DASHSCOPE_API_KEY": "secret-canary"})
+        self.assertIn("401", str(result.exception))
+        self.assertNotIn("secret-canary", str(result.exception))
+
+    def test_api_success_validates_provider_response(self):
+        response = io.BytesIO(b'{"choices":[{"message":{"content":"OK"}}]}')
+        with patch.object(self.launcher.urllib.request, "urlopen", return_value=response):
+            self.launcher.check_api({"DASHSCOPE_API_KEY": "test-value"})
+
+    def test_config_keys_exist_in_upstream_argument_classes(self):
+        fields = set()
+        for path in (ROOT / "src/speech_to_speech/arguments_classes").glob("*.py"):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                    fields.add(node.target.id)
+        for profile in ("gpu", "cpu"):
+            self.assertFalse(set(self.launcher.pipeline_config(profile, {})) - fields)
+
+    def test_demo_start_failure_stops_backend_and_removes_config(self):
+        backend = MagicMock()
+        backend.poll.return_value = None
+        response = MagicMock()
+        response.__enter__.return_value.status = 200
+        with tempfile.TemporaryDirectory(dir=ROOT) as folder:
+            with patch.object(self.launcher, "ROOT", Path(folder)), \
+                 patch.object(self.launcher.subprocess, "Popen", side_effect=[backend, OSError("demo failed")]), \
+                 patch.object(self.launcher.urllib.request, "urlopen", return_value=response), \
+                 patch.object(self.launcher.signal, "signal"), \
+                 patch.dict(os.environ, {"DASHSCOPE_API_KEY": "test-value"}):
+                with self.assertRaisesRegex(OSError, "demo failed"):
+                    self.launcher.supervise(Path(folder) / "bin/python", {"port": 8765}, True)
+                backend.terminate.assert_called_once()
+                self.assertFalse((Path(folder) / ".runtime/bailian.json").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

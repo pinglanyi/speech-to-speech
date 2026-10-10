@@ -233,3 +233,6 @@ uv.lock
 
 # JavaScript dependencies
 node_modules/
+
+# Ubuntu launcher runtime configuration (no credentials stored here).
+.runtime/
