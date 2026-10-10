@@ -46,6 +46,19 @@ def configure_nltk_data(env) -> None:
     env["NLTK_DATA"] = str(path)
 
 
+def configure_gpu_libraries(python: Path, env: dict[str, str]) -> None:
+    # cuDNN loads some engines via dlopen by soname. These lookups need the
+    # wheel libraries on the search path at process startup, before torch imports.
+    site = Path(subprocess.check_output(
+        [str(python), "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        text=True, cwd=ROOT).strip())
+    candidates = [*sorted((site / "nvidia").glob("*/lib")), site / "torch/lib"]
+    libraries = [str(path) for path in candidates if path.is_dir() and any(path.glob("*.so*"))]
+    if libraries:
+        existing = [path for path in env.get("LD_LIBRARY_PATH", "").split(":") if path]
+        env["LD_LIBRARY_PATH"] = ":".join(dict.fromkeys([*libraries, *existing]))
+
+
 def validate_runtime(info: dict, label: str) -> None:
     version = tuple(info["version"][:2])
     if (not (3, 11) <= version < (3, 13)
@@ -235,13 +248,13 @@ def ensure_free(port: int) -> None:
             raise ValueError(f"Local port {port} is occupied; stop the old process or change .env.") from None
 
 
-def supervise(python: Path, config: dict, demo: bool) -> int:
+def supervise(python: Path, config: dict, demo: bool, runtime_env: dict[str, str] | None = None) -> int:
     folder = ROOT / ".runtime"
     folder.mkdir(mode=0o700, exist_ok=True)
     path = folder / "bailian.json"
     path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
     path.chmod(0o600)
-    env = dict(os.environ)
+    env = dict(os.environ if runtime_env is None else runtime_env)
     env["OPENAI_API_KEY"] = require_key(env)
     configure_nltk_data(env)
     processes: list[subprocess.Popen] = []
@@ -347,9 +360,21 @@ def main(argv=None) -> int:
     if args.install_only:
         print("venv installation complete; run bash run.sh again to start.")
         return 0
+    runtime_env = dict(os.environ)
     if profile == "gpu":
-        run([str(python), "-c", "import torch; assert torch.cuda.is_available(), 'PyTorch cannot use CUDA; check NVIDIA driver/PyTorch installation.'"])
-    return supervise(python, config, demo)
+        configure_gpu_libraries(python, runtime_env)
+        # Exercise cuDNN before loading large models; device detection alone
+        # cannot catch missing engine libraries or their CUDA dependencies.
+        run([str(python), "-c",
+             "import torch; "
+             "assert torch.cuda.is_available(), 'PyTorch cannot use CUDA; check NVIDIA driver/PyTorch installation.'; "
+             "assert torch.backends.cudnn.is_available(), 'cuDNN is unavailable in this PyTorch build.'; "
+             "x=torch.zeros(1,80,64,device='cuda',dtype=torch.float16); "
+             "w=torch.ones(128,80,3,device='cuda',dtype=torch.float16); "
+             "torch.nn.functional.conv1d(x,w); torch.cuda.synchronize(); "
+             "print('GPU preflight OK: torch',torch.__version__,'CUDA',torch.version.cuda,'cuDNN',torch.backends.cudnn.version(),flush=True)"],
+            env=runtime_env)
+    return supervise(python, config, demo, runtime_env=runtime_env)
 
 
 if __name__ == "__main__":

@@ -164,6 +164,17 @@ chmod 700 .runtime .runtime/nltk_data
 
 `npm audit` 的漏洞汇总不是此次 Python 崩溃的原因。需要查看详细报告确认受影响依赖后再更新，不要直接使用可能引入破坏性升级的 `npm audit fix --force`。
 
+若 Qwen3-ASR 预热提示无法加载 `libcudnn_engines_runtime_compiled.so.9`，先检查当前 venv 中是否存在库及其依赖。PyTorch 的 pip CUDA/cuDNN 包通常位于 `.venv-gpu/lib/python3.x/site-packages/nvidia/*/lib`；系统 `LD_LIBRARY_PATH` 可能只包含其他 CUDA 版本。GPU 启动器现会自动把当前 venv 内含 `.so` 文件的 NVIDIA 库目录和 `torch/lib` 放到子进程的库搜索路径前面，再保留原有路径。仅作用于本次启动的进程，不修改系统 CUDA、驱动或 shell 配置。CPU 启动不做此处理。
+
+GPU 启动在加载模型前执行小型 FP16 卷积检查，通过后显示 `GPU preflight OK`。此检查不能替代完整模型预热。拉取更新即可使用已有 venv 和模型缓存，无需 `--reinstall`。如果仍无法加载，检查缺失的底层依赖：
+
+```bash
+find .venv-gpu/lib -path '*/nvidia/cudnn/lib/libcudnn_engines_runtime_compiled.so.9' -exec ldd {} \;
+.venv-gpu/bin/python -m pip check
+```
+
+将 `not found` 的条目和报错末尾一并提供；不要先盲目升级 cuDNN 或 CUDA，版本应满足当前 PyTorch 的依赖要求。
+
 启动器的自动化测试覆盖 GPU/CPU 配置、Key 不进入配置、环境变量优先级、`.env` 不执行 shell、依赖选择及 API 错误处理。不包含实际模型推理或目标 Ubuntu/CUDA 环境的端到端验证，最终需在服务器安装后测试。
 
 ```bash

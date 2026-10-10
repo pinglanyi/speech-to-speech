@@ -98,6 +98,58 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(env["NLTK_DATA"], str(custom))
                 self.assertTrue(custom.is_dir())
 
+    def test_gpu_libraries_precede_system_cuda_and_preserve_other_paths(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as folder:
+            site = Path(folder) / "site-packages"
+            cudnn = site / "nvidia/cudnn/lib"
+            runtime = site / "nvidia/cuda_runtime/lib"
+            unused = site / "nvidia/unused/lib"
+            for directory in (cudnn, runtime, unused):
+                directory.mkdir(parents=True)
+            (cudnn / "libcudnn_engines_runtime_compiled.so.9").touch()
+            (runtime / "libcudart.so.13").touch()
+            env = {"LD_LIBRARY_PATH": "/opt/openfoam/lib:/usr/local/cuda-12.6/lib64:"}
+            original = dict(env)
+            with patch.object(self.launcher.subprocess, "check_output", return_value=str(site)):
+                self.launcher.configure_gpu_libraries(Path(folder) / "bin/python", env)
+            expected = ":".join([str(runtime), str(cudnn), "/opt/openfoam/lib", "/usr/local/cuda-12.6/lib64"])
+            self.assertEqual(env["LD_LIBRARY_PATH"], expected)
+            self.assertNotIn(str(unused), env["LD_LIBRARY_PATH"])
+            self.assertNotEqual(env, original)
+
+    def test_no_packaged_gpu_libraries_preserves_existing_environment(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as folder:
+            env = {"LD_LIBRARY_PATH": "/custom/lib"}
+            with patch.object(self.launcher.subprocess, "check_output", return_value=folder):
+                self.launcher.configure_gpu_libraries(Path(folder) / "bin/python", env)
+            self.assertEqual(env, {"LD_LIBRARY_PATH": "/custom/lib"})
+
+    def test_gpu_preflight_and_backend_share_paths_cpu_does_not_configure_them(self):
+        def configure(python, env):
+            env["LD_LIBRARY_PATH"] = "/venv/nvidia/cudnn/lib"
+
+        for profile in ("gpu", "cpu"):
+            with self.subTest(profile=profile), \
+                 patch.object(self.launcher.sys, "platform", "linux"), \
+                 patch.object(self.launcher, "load_env"), \
+                 patch.object(self.launcher, "check_api"), \
+                 patch.object(self.launcher, "ensure_free"), \
+                 patch.object(self.launcher, "bootstrap", return_value=Path("/venv/bin/python")), \
+                 patch.object(self.launcher, "configure_gpu_libraries", side_effect=configure) as libraries, \
+                 patch.object(self.launcher, "run") as preflight, \
+                 patch.object(self.launcher, "supervise", return_value=0) as backend, \
+                 patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-value"}, clear=True):
+                self.assertEqual(self.launcher.main(["--" + profile, "--no-demo"]), 0)
+                if profile == "gpu":
+                    libraries.assert_called_once()
+                    preflight.assert_called_once()
+                    self.assertEqual(preflight.call_args.kwargs["env"], backend.call_args.kwargs["runtime_env"])
+                    self.assertEqual(backend.call_args.kwargs["runtime_env"]["LD_LIBRARY_PATH"], "/venv/nvidia/cudnn/lib")
+                else:
+                    libraries.assert_not_called()
+                    preflight.assert_not_called()
+                self.assertNotIn("LD_LIBRARY_PATH", os.environ)
+
     def test_default_provider_is_deepseek_official(self):
         cfg = self.launcher.pipeline_config("gpu", {"DASHSCOPE_API_KEY": "old-key"})
         self.assertEqual(cfg["responses_api_base_url"], "https://api.deepseek.com")
@@ -237,8 +289,12 @@ class LauncherTests(unittest.TestCase):
                  patch.object(self.launcher.signal, "signal"), \
                  patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-value"}):
                 with self.assertRaisesRegex(OSError, "demo failed"):
-                    self.launcher.supervise(Path(folder) / "bin/python", {"port": 8765}, True)
+                    self.launcher.supervise(Path(folder) / "bin/python", {"port": 8765}, True,
+                                            runtime_env={"DEEPSEEK_API_KEY": "test-value", "LD_LIBRARY_PATH": "/venv/nvidia/cudnn/lib"})
                 backend.terminate.assert_called_once()
+                calls = self.launcher.subprocess.Popen.call_args_list
+                self.assertEqual(calls[0].kwargs["env"]["LD_LIBRARY_PATH"], "/venv/nvidia/cudnn/lib")
+                self.assertNotIn("DEEPSEEK_API_KEY", calls[1].kwargs["env"])
                 self.assertFalse((Path(folder) / ".runtime/bailian.json").exists())
 
 
