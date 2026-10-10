@@ -148,7 +148,13 @@ PYTHON_BIN=python3.11 bash run.sh --gpu
 
 启动器现在在安装前检查 Python 接口和正式版本状态，也会检查已有 venv，避免加载模型时才失败。CPU 使用同样步骤，将目录和选项改为 `.venv-cpu` / `--cpu`。模型缓存位于用户 Hugging Face 缓存目录，重建 venv 可继续复用它们。
 
-`DeepFilterNet not available` 表示缺少可选增强组件，默认配置不启用它。HF_TOKEN 警告通常不阻止公开模型下载；镜像可能重定向到模型 CDN，最终以下载是否成功为准。
+本启动器现在始终安装 `deepfilternet-rs==0.1.1`，通过 Rust 运行 DeepFilterNet，并使用包内附带的权重，不需要额外从 GitHub 下载降噪模型。首次升级会自动补装依赖并执行离线模型检查；GPU/CPU 两种环境均可用。该第三方绑定包沿用上游 Rust 运行时，避免旧版 `df` 对 NumPy 1.x、旧 torchaudio I/O 接口的依赖。它不是旧版 `deepfilternet` Python 包。
+
+在 `.env` 添加 `S2S_AUDIO_ENHANCEMENT=0` 关闭降噪，或改为 `S2S_AUDIO_ENHANCEMENT=1` 启用，然后重启。默认关闭，但组件始终安装；关闭时不会加载降噪模型。降噪运行在 CPU，对语音片段重采样至 48kHz，处理并补齐缓冲尾部，再恢复原采样率和长度。每段重新初始化状态，避免前一段影响下一段，会增加 CPU 处理开销。模型随包安装，不受 `HF_ENDPOINT` 控制。不要重新复制 `.env.example` 覆盖已有 Key，只添加开关即可。
+
+`DeepFilterNet not available` 若在升级后仍出现，检查是否使用了最新源码和当前 venv，及 `DeepFilterNet installation check OK` 是否通过。HF_TOKEN 警告通常不阻止公开模型下载；镜像可能重定向到模型 CDN，最终以下载是否成功为准。
+
+若 TTS 初始化报 `MimiConfig object has no attribute rope_theta`，更新当前 `test` 分支。兼容层仅适配 `qwen_tts._transformers_compat` 的旧默认 RoPE 函数，读取模型 `rope_parameters` 中实际保存的 theta，而非为模型填入猜测值。旧配置和其他 RoPE 初始化器保留原处理方式。TTS 初始化失败后的重复清理也不会再因缺少 `model` 产生误导性警告。
 
 NLTK 的目录权限警告和 `Connection timed out` 是两个不同问题。启动器默认创建私有 `.runtime/nltk_data`，也支持在 `.env` 设置单个绝对路径 `NLTK_DATA`。自定义目录及路径中父目录不能让其他用户写入；脚本不会修改用户指定目录或父目录的权限。可使用 `namei -l /实际目录` 检查并由目录所有者处理。
 

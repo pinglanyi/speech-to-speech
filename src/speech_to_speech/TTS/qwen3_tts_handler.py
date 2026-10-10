@@ -253,6 +253,10 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 qwentts_ref_cache_dir=self.ref_cache_dir,
             )
 
+        from speech_to_speech.TTS.qwen_rope_compat import install_qwen_rope_compat
+
+        if backend != "ggml" and install_qwen_rope_compat():
+            logger.info("Applied Qwen TTS RoPE compatibility for modern Transformers configs")
         self.model = FasterQwen3TTS.from_pretrained(model_name, **load_kwargs)
         logger.info("Qwen3-TTS model loaded")
 
@@ -1048,13 +1052,14 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
 
     def cleanup(self) -> None:
         try:
-            del self.model
+            if hasattr(self, "model"):
+                del self.model
             for path in list(getattr(self, "_mlx_temp_ref_audio_files", set())):
                 try:
                     Path(path).unlink(missing_ok=True)
                 except Exception:
                     pass
-            if self.backend == "mlx":
+            if getattr(self, "backend", None) == "mlx":
                 try:
                     import mlx.core as mx
 

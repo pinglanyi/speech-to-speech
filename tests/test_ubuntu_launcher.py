@@ -59,6 +59,15 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(cfg["responses_api_reasoning_effort"], "none")
         self.assertFalse(cfg["responses_api_disable_thinking"])
 
+    def test_enhancement_is_installed_for_both_profiles_but_disabled_by_default(self):
+        for profile in ("gpu", "cpu"):
+            self.assertIn("deepfilternet-rs==0.1.1", self.launcher.install_requirements(profile))
+            self.assertFalse(self.launcher.pipeline_config(profile, {})["audio_enhancement"])
+            self.assertTrue(self.launcher.pipeline_config(profile, {"S2S_AUDIO_ENHANCEMENT": "1"})["audio_enhancement"])
+            self.assertFalse(self.launcher.pipeline_config(profile, {"S2S_AUDIO_ENHANCEMENT": "0"})["audio_enhancement"])
+        with self.assertRaisesRegex(ValueError, "S2S_AUDIO_ENHANCEMENT"):
+            self.launcher.pipeline_config("gpu", {"S2S_AUDIO_ENHANCEMENT": "typo"})
+
     def test_python_missing_required_sys_api_stops_before_install(self):
         with patch.object(self.launcher.sys, "platform", "linux"), \
              patch.object(self.launcher.sys, "get_int_max_str_digits", None), \

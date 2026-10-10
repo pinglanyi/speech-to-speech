@@ -118,6 +118,9 @@ def require_key(env: dict[str, str]) -> str:
 
 def pipeline_config(profile: str, env: dict[str, str]) -> dict:
     provider = provider_settings(env)
+    enhancement = env.get("S2S_AUDIO_ENHANCEMENT", "0").strip()
+    if enhancement not in ("0", "1"):
+        raise ValueError("S2S_AUDIO_ENHANCEMENT must be 0 (off) or 1 (on).")
     config = {
         "host": "127.0.0.1",
         "port": int(env.get("S2S_PORT", "8765")),
@@ -131,6 +134,7 @@ def pipeline_config(profile: str, env: dict[str, str]) -> dict:
         "init_chat_prompt": "你是中文语音助手。请用简洁自然的中文回答，通常不超过三句话。",
         "stream_batch_sentences": 1,
         "log_transcripts": False,
+        "audio_enhancement": enhancement == "1",
     }
     if profile == "gpu":
         config.update({
@@ -172,6 +176,8 @@ def install_requirements(profile: str) -> list[str]:
     # Browser HTTP adapter imports auth and limiter (optional HF OAuth).
     deps.append("huggingface-hub[oauth]>=0.34.0")
     deps.append("silero-vad==5.1.2")
+    # Bundled model and CPU Rust runtime avoid legacy df/torchaudio APIs.
+    deps.append("deepfilternet-rs==0.1.1")
     return deps
 
 
@@ -208,6 +214,11 @@ def bootstrap(profile: str, reinstall: bool, demo: bool) -> Path:
         run([str(python), "-m", "pip", "install", *deps])
         run([str(python), "-m", "pip", "install", "--no-deps", "-e", "."])
         run([str(python), "-m", "pip", "check"])
+        run([str(python), "-c",
+             "import numpy as np; from deepfilternet_rs import DeepFilterNetRealtime; "
+             "p=DeepFilterNetRealtime(log_level='warn'); "
+             "y=np.concatenate([p.process_chunk(np.zeros(4800,dtype=np.float32)),p.finalize()]); p.close(); "
+             "assert y.size and np.isfinite(y).all(); print('DeepFilterNet installation check OK (bundled model).')"])
         marker.write_text(fingerprint)
     if demo and (reinstall or not (ROOT / "demo/node_modules/@openai/agents/package.json").exists()):
         run(["npm", "ci", "--prefix", "demo"])

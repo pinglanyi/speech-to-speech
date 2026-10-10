@@ -21,6 +21,7 @@ from speech_to_speech.pipeline.speaker_metadata import PendingSpeakerAttribution
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.utils import int2float
 from speech_to_speech.VAD.model_loader import load_silero_model
+from speech_to_speech.VAD.deepfilter_enhancement import DeepFilterEnhancer, HAS_DEEPFILTER
 from speech_to_speech.VAD.vad_iterator import VADIterator
 
 if TYPE_CHECKING:
@@ -48,7 +49,8 @@ _SHORT_SEGMENT_MIN_FRAGMENT_MS = 100
 
 # Optional import for audio enhancement
 try:
-    from df.enhance import enhance, init_df
+    if not HAS_DEEPFILTER:
+        from df.enhance import enhance, init_df
 
     HAS_DF = True
 except (ImportError, ModuleNotFoundError) as e:
@@ -167,7 +169,10 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._configured_min_silence_samples = self.iterator.min_silence_samples
         self.audio_enhancement = audio_enhancement
         if audio_enhancement:
-            if not HAS_DF:
+            if HAS_DEEPFILTER:
+                self.deepfilter_enhancer = DeepFilterEnhancer(self.sample_rate)
+                logger.info("Audio enhancement enabled: DeepFilterNet Rust runtime (CPU, bundled weights)")
+            elif not HAS_DF:
                 logger.error(
                     "Audio enhancement requested but DeepFilterNet is not available. Disabling audio enhancement."
                 )
@@ -876,6 +881,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
     def _apply_audio_enhancement(self, array: np.ndarray) -> np.ndarray:
         """Apply audio enhancement if enabled."""
+        if HAS_DEEPFILTER:
+            return self.deepfilter_enhancer.enhance(array)
         import torchaudio
 
         if self.sample_rate != self.df_state.sr():
