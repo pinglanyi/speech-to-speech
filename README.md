@@ -28,7 +28,7 @@ This pipeline runs in production as the conversation backend for thousands of [R
 
 ## Quickstart
 
-Ubuntu users connecting to Alibaba Cloud Bailian: see the [Chinese venv one-command launcher guide](docs/ubuntu-bailian.md) for GPU and CPU profiles, API configuration, and browser testing over SSH.
+Ubuntu users connecting to DeepSeek (default) or Alibaba Cloud Bailian: copy `.env.example` to `.env` and see the [Chinese venv one-command launcher guide](docs/ubuntu-bailian.md) for GPU and CPU profiles, API configuration, and browser testing over SSH.
 
 Choose where the language model should run. All three configurations use local Parakeet TDT speech recognition and Qwen3-TTS speech output **by default**. You can change the STT, LLM, and TTS models and backends; see [Supported components](#supported-components). Each configuration runs from one terminal with the packaged microphone/speaker client.
 

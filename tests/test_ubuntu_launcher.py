@@ -50,14 +50,34 @@ class LauncherTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "PYTHON_BIN=python3.11"):
                 self.launcher.main(["--cpu", "--install-only"])
 
-    def test_gpu_configuration_is_chinese_and_uses_bailian(self):
+    def test_gpu_configuration_is_chinese_and_uses_deepseek(self):
         cfg = self.launcher.pipeline_config("gpu", {})
         self.assertEqual(cfg["stt"], "qwen3-asr")
         self.assertEqual(cfg["qwen3_asr_language"], "zh")
         self.assertEqual(cfg["qwen3_tts_backend"], "torch")
         self.assertEqual(cfg["llm_backend"], "chat-completions")
-        self.assertIsNone(cfg["responses_api_reasoning_effort"])
+        self.assertEqual(cfg["responses_api_reasoning_effort"], "none")
         self.assertFalse(cfg["responses_api_disable_thinking"])
+
+    def test_default_provider_is_deepseek_official(self):
+        cfg = self.launcher.pipeline_config("gpu", {"DASHSCOPE_API_KEY": "old-key"})
+        self.assertEqual(cfg["responses_api_base_url"], "https://api.deepseek.com")
+        self.assertEqual(cfg["model_name"], "deepseek-flash")
+        with self.assertRaisesRegex(ValueError, "DEEPSEEK_API_KEY"):
+            self.launcher.require_key({"DASHSCOPE_API_KEY": "old-key"})
+
+    def test_bailian_is_still_explicitly_selectable(self):
+        env = {"S2S_LLM_PROVIDER": "bailian", "DASHSCOPE_API_KEY": "test-key"}
+        cfg = self.launcher.pipeline_config("cpu", env)
+        self.assertEqual(cfg["responses_api_base_url"], "https://dashscope.aliyuncs.com/compatible-mode/v1")
+        self.assertEqual(cfg["model_name"], "qwen-plus")
+        self.assertEqual(self.launcher.require_key(env), "test-key")
+
+    def test_deepseek_custom_model_and_endpoint(self):
+        env = {"DEEPSEEK_BASE_URL": "https://api.deepseek.com/v1", "DEEPSEEK_MODEL": "deepseek-v4-pro"}
+        cfg = self.launcher.pipeline_config("cpu", env)
+        self.assertEqual(cfg["model_name"], "deepseek-v4-pro")
+        self.assertEqual(cfg["responses_api_base_url"], "https://api.deepseek.com/v1")
 
     def test_cpu_configuration_never_selects_cuda(self):
         cfg = self.launcher.pipeline_config("cpu", {})
@@ -68,11 +88,11 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(cfg["omnivoice_dtype"], "float32")
 
     def test_secret_is_not_in_configuration(self):
-        cfg = self.launcher.pipeline_config("gpu", {"DASHSCOPE_API_KEY": "secret-canary"})
+        cfg = self.launcher.pipeline_config("gpu", {"DEEPSEEK_API_KEY": "secret-canary"})
         self.assertNotIn("secret-canary", str(cfg))
 
     def test_endpoint_and_model_can_be_overridden(self):
-        cfg = self.launcher.pipeline_config("cpu", {"DASHSCOPE_BASE_URL": "https://example.org/v1", "DASHSCOPE_MODEL": "custom"})
+        cfg = self.launcher.pipeline_config("cpu", {"DEEPSEEK_BASE_URL": "https://example.org/v1", "DEEPSEEK_MODEL": "custom"})
         self.assertEqual(cfg["responses_api_base_url"], "https://example.org/v1")
         self.assertEqual(cfg["model_name"], "custom")
 
@@ -93,7 +113,7 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(os.environ["DASHSCOPE_MODEL"], "exported-model")
 
     def test_missing_key_is_actionable(self):
-        with self.assertRaisesRegex(ValueError, "DASHSCOPE_API_KEY"):
+        with self.assertRaisesRegex(ValueError, "DEEPSEEK_API_KEY"):
             self.launcher.require_key({})
 
     def test_base_requirements_do_not_require_native_ggml(self):
@@ -132,14 +152,30 @@ class LauncherTests(unittest.TestCase):
         error = urllib.error.HTTPError("https://example.org", 401, "Unauthorized", {}, io.BytesIO(b"secret-canary"))
         with patch.object(self.launcher.urllib.request, "urlopen", side_effect=error):
             with self.assertRaises(ValueError) as result:
-                self.launcher.check_api({"DASHSCOPE_API_KEY": "secret-canary"})
+                self.launcher.check_api({"DEEPSEEK_API_KEY": "secret-canary"})
         self.assertIn("401", str(result.exception))
         self.assertNotIn("secret-canary", str(result.exception))
 
     def test_api_success_validates_provider_response(self):
         response = io.BytesIO(b'{"choices":[{"message":{"content":"OK"}}]}')
         with patch.object(self.launcher.urllib.request, "urlopen", return_value=response):
-            self.launcher.check_api({"DASHSCOPE_API_KEY": "test-value"})
+            self.launcher.check_api({"DEEPSEEK_API_KEY": "test-value"})
+
+    def test_api_check_targets_official_deepseek_with_non_thinking_payload(self):
+        response = io.BytesIO(b'{"choices":[{"message":{"content":"OK"}}]}')
+        with patch.object(self.launcher.urllib.request, "urlopen", return_value=response) as call:
+            self.launcher.check_api({"DEEPSEEK_API_KEY": "test-value"})
+        request = call.call_args.args[0]
+        self.assertEqual(request.full_url, "https://api.deepseek.com/chat/completions")
+        import json
+        payload = json.loads(request.data)
+        self.assertEqual(payload["model"], "deepseek-flash")
+        self.assertEqual(payload["reasoning_effort"], "none")
+        self.assertEqual(request.get_header("Authorization"), "Bearer test-value")
+
+    def test_unknown_provider_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "S2S_LLM_PROVIDER"):
+            self.launcher.pipeline_config("cpu", {"S2S_LLM_PROVIDER": "typo"})
 
     def test_config_keys_exist_in_upstream_argument_classes(self):
         fields = set()
@@ -160,7 +196,7 @@ class LauncherTests(unittest.TestCase):
                  patch.object(self.launcher.subprocess, "Popen", side_effect=[backend, OSError("demo failed")]), \
                  patch.object(self.launcher.urllib.request, "urlopen", return_value=response), \
                  patch.object(self.launcher.signal, "signal"), \
-                 patch.dict(os.environ, {"DASHSCOPE_API_KEY": "test-value"}):
+                 patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-value"}):
                 with self.assertRaisesRegex(OSError, "demo failed"):
                     self.launcher.supervise(Path(folder) / "bin/python", {"port": 8765}, True)
                 backend.terminate.assert_called_once()

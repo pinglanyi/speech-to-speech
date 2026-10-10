@@ -1,4 +1,4 @@
-"""Ubuntu venv bootstrap, Bailian preflight, and supervised browser demo.
+"""Ubuntu venv bootstrap, DeepSeek/Bailian preflight, and browser demo.
 
 Uses only the standard library until the isolated environment is ready.
 Credentials remain in environment variables and never enter CLI arguments.
@@ -51,23 +51,44 @@ def load_env(path: Path) -> None:
         os.environ.setdefault(name, value)
 
 
+def provider_settings(env: dict[str, str]) -> dict:
+    provider = env.get("S2S_LLM_PROVIDER", "deepseek").strip().lower()
+    if provider == "deepseek":
+        return {
+            "name": "DeepSeek", "key_env": "DEEPSEEK_API_KEY",
+            "base_url": env.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+            "model": env.get("DEEPSEEK_MODEL", "deepseek-flash"),
+            "reasoning_effort": env.get("DEEPSEEK_REASONING_EFFORT", "none"),
+        }
+    if provider == "bailian":
+        return {
+            "name": "Bailian", "key_env": "DASHSCOPE_API_KEY",
+            "base_url": env.get("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            "model": env.get("DASHSCOPE_MODEL", "qwen-plus"),
+            "reasoning_effort": None,
+        }
+    raise ValueError("S2S_LLM_PROVIDER must be deepseek or bailian; see .env.example.")
+
+
 def require_key(env: dict[str, str]) -> str:
-    key = env.get("DASHSCOPE_API_KEY", "").strip()
+    settings = provider_settings(env)
+    key = env.get(settings["key_env"], "").strip()
     if not key:
-        raise ValueError("Set DASHSCOPE_API_KEY in .env or export it before starting.")
+        raise ValueError(f"Set {settings['key_env']} in .env or export it before starting; see .env.example.")
     return key
 
 
 def pipeline_config(profile: str, env: dict[str, str]) -> dict:
+    provider = provider_settings(env)
     config = {
         "host": "127.0.0.1",
         "port": int(env.get("S2S_PORT", "8765")),
         "num_pipelines": 1,
         "llm_backend": "chat-completions",
-        "model_name": env.get("DASHSCOPE_MODEL", "qwen-plus"),
-        "responses_api_base_url": env.get("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-        # Other providers' reasoning_effort/chat_template_kwargs are not Bailian flags.
-        "responses_api_reasoning_effort": None,
+        "model_name": provider["model"],
+        "responses_api_base_url": provider["base_url"],
+        # DeepSeek supports reasoning_effort=none to disable thinking for voice.
+        "responses_api_reasoning_effort": provider["reasoning_effort"],
         "responses_api_disable_thinking": False,
         "init_chat_prompt": "你是中文语音助手。请用简洁自然的中文回答，通常不超过三句话。",
         "stream_batch_sentences": 1,
@@ -145,25 +166,29 @@ def bootstrap(profile: str, reinstall: bool, demo: bool) -> Path:
 
 
 def check_api(env: dict[str, str]) -> None:
+    provider = provider_settings(env)
+    name = provider["name"]
     key = require_key(env)
-    base = env.get("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1").rstrip("/")
+    base = provider["base_url"].rstrip("/")
     if not base.startswith("https://"):
-        raise ValueError("DASHSCOPE_BASE_URL must use https://.")
-    payload = {"model": env.get("DASHSCOPE_MODEL", "qwen-plus"),
+        raise ValueError(f"{name} base URL must use https://.")
+    payload = {"model": provider["model"],
                "messages": [{"role": "user", "content": "请只回复：连接成功"}], "max_tokens": 32}
+    if provider["reasoning_effort"] is not None:
+        payload["reasoning_effort"] = provider["reasoning_effort"]
     request = urllib.request.Request(base + "/chat/completions", json.dumps(payload).encode(),
                                      {"Authorization": "Bearer " + key, "Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(request, timeout=45) as response:
             result = json.load(response)
         if not result.get("choices"):
-            raise ValueError("Bailian response has no choices; verify the endpoint/model.")
+            raise ValueError(f"{name} response has no choices; verify the endpoint/model.")
     except urllib.error.HTTPError as error:
         # Never print raw provider payloads, which may contain request details.
-        raise ValueError(f"Bailian HTTP {error.code}: check key, region/base URL, model access and balance.") from None
+        raise ValueError(f"{name} HTTP {error.code}: check key, base URL, model access and balance.") from None
     except (urllib.error.URLError, TimeoutError):
-        raise ValueError("Bailian connection failed: check DNS, network and DASHSCOPE_BASE_URL.") from None
-    print("Bailian API connection OK.", flush=True)
+        raise ValueError(f"{name} connection failed: check DNS, network and the base URL in .env.example.") from None
+    print(f"{name} API connection OK.", flush=True)
 
 
 def ensure_free(port: int) -> None:
@@ -210,7 +235,7 @@ def supervise(python: Path, config: dict, demo: bool) -> int:
             demo_env["SPEECH_TO_SPEECH_URL"] = f"ws://localhost:{config['port']}/v1/realtime"
             demo_env["STARTUP_GREETING"] = "请用中文简短地打招呼。"
             # The browser adapter only needs the public backend URL, not the LLM key.
-            for key in ("DASHSCOPE_API_KEY", "OPENAI_API_KEY"):
+            for key in ("DEEPSEEK_API_KEY", "DASHSCOPE_API_KEY", "OPENAI_API_KEY"):
                 demo_env.pop(key, None)
             port = env.get("S2S_DEMO_PORT", "7860")
             processes.append(subprocess.Popen([str(python), "-m", "uvicorn", "--app-dir", "demo", "server:app",
@@ -235,11 +260,11 @@ def supervise(python: Path, config: dict, demo: bool) -> int:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Ubuntu venv launcher: local Chinese speech + Bailian LLM")
+    parser = argparse.ArgumentParser(description="Ubuntu venv launcher: local Chinese speech + DeepSeek/Bailian LLM")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--gpu", action="store_true", help="Qwen3-ASR + Qwen3-TTS on NVIDIA")
     group.add_argument("--cpu", action="store_true", help="Faster Whisper int8 + OmniVoice on CPU (slower)")
-    parser.add_argument("--check-api", action="store_true", help="Check Bailian only, without installing or loading models")
+    parser.add_argument("--check-api", action="store_true", help="Check the selected LLM API without installing or loading models")
     parser.add_argument("--install-only", action="store_true", help="Prepare .venv without starting services")
     parser.add_argument("--reinstall", action="store_true", help="Refresh dependencies")
     parser.add_argument("--no-demo", action="store_true", help="Start only the speech backend; no Node.js needed")

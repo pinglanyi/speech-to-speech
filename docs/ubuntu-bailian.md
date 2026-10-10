@@ -1,6 +1,6 @@
-# Ubuntu 一键启动：百炼 + 中文语音
+# Ubuntu 一键启动：DeepSeek 官方 API + 中文语音
 
-此脚本使用 **venv**，不使用 Conda 或 Docker。百炼负责文字回答；语音识别和合成在服务器运行。网页在个人电脑上使用麦克风，不需要服务器声卡。
+此脚本使用 **venv**，不使用 Conda 或 Docker。默认由 DeepSeek 官方 API 负责文字回答；语音识别和合成在服务器运行。网页在个人电脑上使用麦克风，不需要服务器声卡。所有环境配置集中在根目录 `.env.example`；复制为 `.env` 后填写 Key 即可。百炼保留为可选服务。
 
 ## 1. 系统准备
 
@@ -38,7 +38,7 @@ HF_HUB_DISABLE_XET=1
 
 如果镜像缺少某个模型或临时不可用，可更换 `HF_ENDPOINT`，例如改为 `https://huggingface.co`。模型会保存在 Hugging Face 默认缓存目录，重复启动复用缓存。为避免 Silero VAD 在启动时另行从 GitHub 下载模型，一键启动器安装 `silero-vad==5.1.2` 并加载包内自带的 VAD 权重（`S2S_PACKAGED_SILERO=1`）。识别、合成和 Smart Turn 的 Hub 模型使用镜像。
 
-镜像设置不改变百炼 API 地址，也不替代系统软件包、pip、npm、Git 仓库或 NLTK 资源的下载地址。使用方法参考：https://hf-mirror.com/ 。已有旧版虚拟环境会因新增依赖自动补装。
+镜像设置不改变 DeepSeek/百炼 API 地址，也不替代系统软件包、pip、npm、Git 仓库或 NLTK 资源的下载地址。使用方法参考：https://hf-mirror.com/ 。已有旧版虚拟环境会因新增依赖自动补装。
 
 ## 2. 下载 test 分支和配置 Key
 
@@ -52,17 +52,23 @@ nano .env
 
 服务器没有 GitHub SSH Key 时，clone 地址改为 `https://github.com/pinglanyi/speech-to-speech.git`。
 
-把百炼 Key 填入 `.env` 的 `DASHSCOPE_API_KEY=` 后面。**不要把真实 Key 放进脚本、命令行参数或提交记录。** `.env` 已被 Git 忽略；更换 Key 只需修改此文件。环境中已 export 的变量优先于 `.env`。
+把 DeepSeek 官方 Key 填入 `.env` 的 `DEEPSEEK_API_KEY=` 后面。**不要把真实 Key 放进脚本、命令行参数或提交记录。** `.env` 已被 Git 忽略；更换 Key 只需修改此文件。环境中已 export 的变量优先于 `.env`。
 
 默认：
 
 ```dotenv
-DASHSCOPE_API_KEY=在此填写你的新Key
-DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-DASHSCOPE_MODEL=qwen-plus
+S2S_LLM_PROVIDER=deepseek
+DEEPSEEK_API_KEY=在此填写DeepSeek官方Key
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-flash
+DEEPSEEK_REASONING_EFFORT=none
 ```
 
-默认地址为北京地域兼容接口。Key、模型、地域/业务空间地址必须匹配。如果控制台提供带业务空间 ID 的新地址，请将 `DASHSCOPE_BASE_URL` 改为控制台给出的完整基础地址（以 `/compatible-mode/v1` 结尾，不包含 `/chat/completions`）。国际地域使用其对应地址，不能混用 Key。
+默认使用 DeepSeek 官方 Chat Completions 地址，基础地址不要包含 `/chat/completions`。`deepseek-flash` 是当前官方文档中的模型名，也可在 `.env` 改为 `deepseek-v4-pro`。默认 `DEEPSEEK_REASONING_EFFORT=none` 关闭思考以减少语音等待；可改为 `low`、`high` 或 `max` 启用思考，但首次回答通常更慢。
+
+从旧版百炼配置升级：`git pull --ff-only origin test` 不会覆盖已有 `.env`。保留现有文件，用 `nano .env` 加入上面的五项。旧 `DASHSCOPE_*` 变量在默认 DeepSeek 模式下不会使用；百炼 Key 不能当作 DeepSeek 官方 Key。不要为了更新配置覆盖自己保存的 Key。
+
+需要切回百炼时，设置 `S2S_LLM_PROVIDER=bailian`，并填写 `.env.example` 中注释的 `DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`、`DASHSCOPE_MODEL` 三项。百炼 Key、模型、地域/业务空间地址必须匹配。所有可选配置都在 `.env.example`。
 
 先检查 API（会产生一次很短的模型调用，不安装模型）：
 
@@ -70,7 +76,7 @@ DASHSCOPE_MODEL=qwen-plus
 bash run.sh --check-api
 ```
 
-显示 `Bailian API connection OK.` 后继续。401/403 检查 Key 和业务空间权限；404 检查地域地址和模型；429 检查额度、余额和限流。脚本不会打印 Key 或原始错误响应。
+显示 `DeepSeek API connection OK.` 后继续（百炼模式显示 `Bailian`）。401/403 检查 Key 和权限；404 检查地址和模型；429 检查额度、余额和限流。脚本不会打印 Key 或原始错误响应。
 
 ## 3. 一键启动
 
@@ -129,3 +135,5 @@ python3 -m unittest discover -s tests -p test_ubuntu_launcher.py -v
 ```
 
 百炼接口参考：https://www.alibabacloud.com/help/en/model-studio/model-calling-in-sub-workspace
+
+DeepSeek 官方接口和模型：https://api-docs.deepseek.com/zh-cn/ ，参数：https://api-docs.deepseek.com/api/create-chat-completion/ 。保留旧脚本/说明文件名以兼容现有安装，启动命令始终为 `bash run.sh`。
