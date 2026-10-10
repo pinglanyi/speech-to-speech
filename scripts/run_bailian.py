@@ -35,6 +35,31 @@ def configure_model_downloads(env) -> None:
     env.setdefault("S2S_PACKAGED_SILERO", "1")
 
 
+def configure_nltk_data(env) -> None:
+    # Create a private data root before NLTK chooses its download directory.
+    # Do not change permissions on user-supplied locations or their ancestors.
+    default = ROOT / ".runtime/nltk_data"
+    path = Path(env.get("NLTK_DATA") or default).expanduser().resolve()
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not env.get("NLTK_DATA"):
+        path.chmod(0o700)
+    env["NLTK_DATA"] = str(path)
+
+
+def validate_runtime(info: dict, label: str) -> None:
+    version = tuple(info["version"][:2])
+    if (not (3, 11) <= version < (3, 13)
+            or info.get("releaselevel") != "final"
+            or not info.get("get_int_max_str_digits")):
+        raise ValueError(
+            f"{label}: incompatible Python runtime: {info}. "
+            "PyTorch requires sys.get_int_max_str_digits; use a current stable Python 3.11/3.12. "
+            "Upgrade/reinstall Python, then move the old .venv-gpu or .venv-cpu aside "
+            "and recreate it with PYTHON_BIN=python3.11 bash run.sh --gpu (or python3.12 / --cpu). "
+            "--reinstall only refreshes packages, not the Python interpreter. See docs/ubuntu-bailian.md."
+        )
+
+
 def load_env(path: Path) -> None:
     if not path.exists():
         return
@@ -147,6 +172,17 @@ def bootstrap(profile: str, reinstall: bool, demo: bool) -> Path:
     if not python.exists():
         print(f"Creating {environment.name} ...", flush=True)
         venv.EnvBuilder(with_pip=True).create(environment)
+    # A cached venv can still point at an old/broken interpreter even when the
+    # launcher itself runs with a newly installed Python. Check before pip too.
+    probe = ("import json,sys; print(json.dumps({"
+             "'version':list(sys.version_info[:3]),"
+             "'releaselevel':sys.version_info.releaselevel,"
+             "'get_int_max_str_digits':callable(getattr(sys,'get_int_max_str_digits',None)),"
+             "'executable':sys.executable}))")
+    info = json.loads(subprocess.check_output([str(python), "-I", "-c", probe], text=True, cwd=ROOT))
+    validate_runtime(info, environment.name)
+    if tuple(info["version"][:2]) != sys.version_info[:2]:
+        raise ValueError(f"{environment.name} uses a different Python version; move it aside and rerun to recreate it.")
     deps = install_requirements(profile)
     fingerprint = hashlib.sha256(json.dumps([deps, sys.version_info[:2]]).encode()).hexdigest()
     marker = environment / ".bailian.installed"
@@ -207,6 +243,7 @@ def supervise(python: Path, config: dict, demo: bool) -> int:
     path.chmod(0o600)
     env = dict(os.environ)
     env["OPENAI_API_KEY"] = require_key(env)
+    configure_nltk_data(env)
     processes: list[subprocess.Popen] = []
 
     def stop(signum, frame):
@@ -290,6 +327,10 @@ def main(argv=None) -> int:
             "Then run: PYTHON_BIN=python3.11 bash run.sh --gpu (or python3.12). "
             "See docs/ubuntu-bailian.md. --check-api does not require tomllib."
         )
+    validate_runtime({"version": list(sys.version_info[:3]),
+                      "releaselevel": getattr(sys.version_info, "releaselevel", "final"),
+                      "get_int_max_str_digits": callable(getattr(sys, "get_int_max_str_digits", None)),
+                      "executable": sys.executable}, "Launcher")
     demo = not args.no_demo
     if demo and not shutil.which("npm"):
         raise ValueError("Install Node.js 20+ and npm, or pass --no-demo.")

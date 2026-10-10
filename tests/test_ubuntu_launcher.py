@@ -59,6 +59,45 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(cfg["responses_api_reasoning_effort"], "none")
         self.assertFalse(cfg["responses_api_disable_thinking"])
 
+    def test_python_missing_required_sys_api_stops_before_install(self):
+        with patch.object(self.launcher.sys, "platform", "linux"), \
+             patch.object(self.launcher.sys, "get_int_max_str_digits", None), \
+             patch.object(self.launcher, "load_env"), \
+             patch.object(self.launcher, "bootstrap") as install, \
+             patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(ValueError, "get_int_max_str_digits"):
+                self.launcher.main(["--gpu", "--install-only"])
+            install.assert_not_called()
+
+    def test_cached_venv_runtime_is_checked_even_with_install_marker(self):
+        import json
+        broken = {"version": [3, 11, 0], "releaselevel": "candidate",
+                  "get_int_max_str_digits": False, "executable": "/old/bin/python"}
+        with tempfile.TemporaryDirectory(dir=ROOT) as folder:
+            environment = Path(folder) / ".venv-gpu"
+            (environment / "bin").mkdir(parents=True)
+            (environment / "bin/python").touch()
+            with patch.object(self.launcher, "venv_path", return_value=environment), \
+                 patch.object(self.launcher.subprocess, "check_output", return_value=json.dumps(broken)), \
+                 patch.object(self.launcher, "run") as install:
+                with self.assertRaisesRegex(ValueError, "get_int_max_str_digits"):
+                    self.launcher.bootstrap("gpu", False, False)
+                install.assert_not_called()
+
+    def test_nltk_uses_created_private_directory_and_preserves_override(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as folder:
+            with patch.object(self.launcher, "ROOT", Path(folder)):
+                env = {}
+                self.launcher.configure_nltk_data(env)
+                default = Path(env["NLTK_DATA"])
+                self.assertTrue(default.is_dir())
+                self.assertEqual(default, Path(folder) / ".runtime/nltk_data")
+                custom = Path(folder) / "custom"
+                env = {"NLTK_DATA": str(custom)}
+                self.launcher.configure_nltk_data(env)
+                self.assertEqual(env["NLTK_DATA"], str(custom))
+                self.assertTrue(custom.is_dir())
+
     def test_default_provider_is_deepseek_official(self):
         cfg = self.launcher.pipeline_config("gpu", {"DASHSCOPE_API_KEY": "old-key"})
         self.assertEqual(cfg["responses_api_base_url"], "https://api.deepseek.com")

@@ -128,6 +128,42 @@ ssh -N -L 7860:127.0.0.1:7860 -L 8765:127.0.0.1:8765 用户名@服务器IP
 
 ## 5. 验证范围
 
+### 启动报错排查
+
+`AttributeError: module 'sys' has no attribute 'get_int_max_str_digits'` 是 Python 运行时问题。正式版 Python 3.11/3.12 应提供该接口；仅凭安装目录中的 `python3.11` 无法判断是否为早期预发布版本或异常安装。先检查：
+
+```bash
+python3.11 -c 'import sys; print(sys.version); print(sys.executable); print(hasattr(sys, "get_int_max_str_digits"))'
+.venv-gpu/bin/python -c 'import sys; print(sys.version); print(sys.executable); print(hasattr(sys, "get_int_max_str_digits"))'
+```
+
+更新/重新安装来自可信来源的稳定版 Python 3.11（及对应的 venv 包），确认检查结果为 `True` 后重建环境。Ubuntu 24.04 可以改用系统 Python 3.12。不要通过给 `sys` 添加假函数绕过，也不要只运行 `--reinstall`，它只更新包。保留旧环境作为备份：
+
+```bash
+git pull origin test
+mv .venv-gpu ".venv-gpu.backup-$(date +%Y%m%d-%H%M%S)"
+PYTHON_BIN=python3.11 bash run.sh --gpu
+# Ubuntu 24.04 也可用：PYTHON_BIN=python3.12 bash run.sh --gpu
+```
+
+启动器现在在安装前检查 Python 接口和正式版本状态，也会检查已有 venv，避免加载模型时才失败。CPU 使用同样步骤，将目录和选项改为 `.venv-cpu` / `--cpu`。模型缓存位于用户 Hugging Face 缓存目录，重建 venv 可继续复用它们。
+
+`DeepFilterNet not available` 表示缺少可选增强组件，默认配置不启用它。HF_TOKEN 警告通常不阻止公开模型下载；镜像可能重定向到模型 CDN，最终以下载是否成功为准。
+
+NLTK 的目录权限警告和 `Connection timed out` 是两个不同问题。启动器默认创建私有 `.runtime/nltk_data`，也支持在 `.env` 设置单个绝对路径 `NLTK_DATA`。自定义目录及路径中父目录不能让其他用户写入；脚本不会修改用户指定目录或父目录的权限。可使用 `namei -l /实际目录` 检查并由目录所有者处理。
+
+NLTK 的 `punkt_tab` / `averaged_perceptron_tagger_eng` 通过其独立下载器获取，`HF_ENDPOINT` 不会代理这些资源。服务器可以联网时预下载：
+
+```bash
+mkdir -p .runtime/nltk_data
+chmod 700 .runtime .runtime/nltk_data
+.venv-gpu/bin/python -m nltk.downloader -d "$PWD/.runtime/nltk_data" punkt_tab averaged_perceptron_tagger_eng
+```
+
+如果仍超时，在可访问 NLTK 下载服务的机器安装相同版本 `nltk==3.10.3`，运行上面下载命令，再把生成的 `tokenizers/` 与 `taggers/` 目录复制到服务器 `.runtime/nltk_data/`。请保留解压后的子目录结构。NLTK 资源补齐后再启动；私有目录设置本身无法修复网络超时。
+
+`npm audit` 的漏洞汇总不是此次 Python 崩溃的原因。需要查看详细报告确认受影响依赖后再更新，不要直接使用可能引入破坏性升级的 `npm audit fix --force`。
+
 启动器的自动化测试覆盖 GPU/CPU 配置、Key 不进入配置、环境变量优先级、`.env` 不执行 shell、依赖选择及 API 错误处理。不包含实际模型推理或目标 Ubuntu/CUDA 环境的端到端验证，最终需在服务器安装后测试。
 
 ```bash
