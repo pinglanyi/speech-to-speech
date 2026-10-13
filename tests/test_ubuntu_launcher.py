@@ -127,6 +127,61 @@ class LauncherTests(unittest.TestCase):
             with self.subTest(env=env), self.assertRaises(ValueError):
                 self.launcher.pipeline_config("gpu", env)
 
+    def test_remote_http_speech_config_uses_service_models_and_no_secrets(self):
+        env = {"S2S_STT_BACKEND": "openai", "S2S_STT_BASE_URL": "http://asr:8000/v1",
+               "S2S_STT_MODEL": "served-asr", "S2S_STT_API_KEY": "stt-secret-canary",
+               "S2S_TTS_BACKEND": "openai", "S2S_TTS_BASE_URL": "http://tts:8091/v1",
+               "S2S_TTS_MODEL": "served-tts", "S2S_TTS_API_KEY": "tts-secret-canary",
+               "S2S_TTS_STREAM": "1", "S2S_TTS_VOICE": "Serena", "S2S_TTS_TASK_TYPE": "CustomVoice"}
+        cfg = self.launcher.pipeline_config("cpu", env)
+        self.assertEqual(cfg["openai_stt_base_url"], "http://asr:8000/v1")
+        self.assertEqual(cfg["openai_stt_model"], "served-asr")
+        self.assertEqual(cfg["openai_tts_model"], "served-tts")
+        self.assertEqual(cfg["openai_tts_voice"], "Serena")
+        self.assertTrue(cfg["openai_tts_stream"])
+        self.assertEqual(cfg["openai_tts_task_type"], "CustomVoice")
+        self.assertNotIn("secret-canary", str(cfg))
+        self.assertNotIn("qwen3_asr_model_name", cfg)
+        self.assertNotIn("omnivoice_model_name", cfg)
+
+    def test_local_vllm_llm_uses_compatible_provider_and_optional_auth(self):
+        env = {"S2S_LLM_PROVIDER": "openai-compatible", "LLM_MODEL": "served-llm",
+               "LLM_BASE_URL": "http://llm:8002/v1"}
+        cfg = self.launcher.pipeline_config("cpu", env)
+        self.assertEqual(cfg["model_name"], "served-llm")
+        self.assertEqual(cfg["responses_api_base_url"], "http://llm:8002/v1")
+        self.assertIsNone(cfg["responses_api_reasoning_effort"])
+        self.assertEqual(self.launcher.require_key(env), "none")
+        with self.assertRaisesRegex(ValueError, "LLM_MODEL"):
+            self.launcher.provider_settings({"S2S_LLM_PROVIDER": "openai-compatible"})
+        response = io.BytesIO(b'{"choices":[{"message":{"content":"OK"}}]}')
+        with patch.object(self.launcher.urllib.request, "urlopen", return_value=response) as request:
+            self.launcher.check_api(env)
+        self.assertEqual(request.call_args.args[0].full_url, "http://llm:8002/v1/chat/completions")
+
+    def test_vllm_realtime_uses_16khz_and_remote_timeouts(self):
+        cfg = self.launcher.pipeline_config("cpu", {
+            "S2S_STT_BACKEND": "vllm-realtime", "S2S_STT_BASE_URL": "ws://asr:8000/v1",
+            "S2S_STT_MODEL": "realtime-asr", "S2S_STT_CONNECT_TIMEOUT": "15",
+            "S2S_STT_TIMEOUT": "90", "S2S_TTS_BACKEND": "openai"})
+        self.assertEqual(cfg["vllm_realtime_stt_model"], "realtime-asr")
+        self.assertEqual(cfg["vllm_realtime_stt_audio_sample_rate"], 16000)
+        self.assertEqual(cfg["vllm_realtime_stt_connect_timeout"], 15)
+        self.assertEqual(cfg["vllm_realtime_stt_final_timeout"], 90)
+
+    def test_invalid_remote_urls_formats_and_stream_options_fail_early(self):
+        cases = [{"S2S_STT_BASE_URL": "ftp://asr/v1"},
+                 {"S2S_STT_BASE_URL": "http://asr/v1/audio/transcriptions"},
+                 {"S2S_TTS_BASE_URL": "http://user:secret@tts/v1"},
+                 {"S2S_TTS_RESPONSE_FORMAT": "mp3"},
+                 {"S2S_TTS_STREAM": "1", "S2S_TTS_RESPONSE_FORMAT": "wav"},
+                 {"S2S_TTS_STREAM": "1", "S2S_TTS_SPEED": "1.5"},
+                 {"S2S_TTS_SAMPLE_RATE": "0"}, {"S2S_STT_TIMEOUT": "nan"},
+                 {"S2S_TTS_REF_AUDIO": "/ref.wav", "S2S_TTS_REF_TEXT": "text"}]
+        for override in cases:
+            with self.subTest(override=override), self.assertRaises(ValueError):
+                self.launcher.pipeline_config("cpu", {"S2S_STT_BACKEND": "openai", "S2S_TTS_BACKEND": "openai", **override})
+
     def test_firered_requires_local_weights_and_installs_its_extra(self):
         with self.assertRaisesRegex(ValueError, "S2S_FIRERED_MODEL_DIR"):
             self.launcher.pipeline_config("gpu", {"S2S_VAD_BACKEND": "firered"})
@@ -238,6 +293,19 @@ class LauncherTests(unittest.TestCase):
                     libraries.assert_not_called()
                     preflight.assert_not_called()
                 self.assertNotIn("LD_LIBRARY_PATH", os.environ)
+
+    def test_fully_remote_speech_does_not_require_local_cuda_even_in_gpu_profile(self):
+        with patch.object(self.launcher.sys, "platform", "linux"), \
+             patch.object(self.launcher, "load_env"), patch.object(self.launcher, "check_api"), \
+             patch.object(self.launcher, "ensure_free"), \
+             patch.object(self.launcher, "bootstrap", return_value=Path("/venv/bin/python")), \
+             patch.object(self.launcher, "configure_gpu_libraries") as libraries, \
+             patch.object(self.launcher, "run") as preflight, \
+             patch.object(self.launcher, "supervise", return_value=0), \
+             patch.dict(os.environ, {"S2S_STT_BACKEND": "openai", "S2S_TTS_BACKEND": "openai"}, clear=True):
+            self.assertEqual(self.launcher.main(["--gpu", "--no-demo"]), 0)
+        libraries.assert_not_called()
+        preflight.assert_not_called()
 
     def test_default_provider_is_deepseek_official(self):
         cfg = self.launcher.pipeline_config("gpu", {"DASHSCOPE_API_KEY": "old-key"})
@@ -365,11 +433,12 @@ class LauncherTests(unittest.TestCase):
                     fields.add(node.target.id)
         for profile in ("gpu", "cpu"):
             self.assertFalse(set(self.launcher.pipeline_config(profile, {})) - fields)
-        for stt in ("qwen3-asr", "faster-whisper", "whisper"):
-            for tts in ("qwen3", "omnivoice"):
+        for stt in ("qwen3-asr", "faster-whisper", "whisper", "openai", "vllm-realtime"):
+            for tts in ("qwen3", "omnivoice", "openai"):
                 env = {"S2S_STT_BACKEND": stt, "S2S_TTS_BACKEND": tts,
-                       "S2S_TTS_REF_AUDIO": "/ref.wav", "S2S_TTS_REF_TEXT": "参考文字",
                        "S2S_TTS_INSTRUCT": "自然说话", "S2S_SMART_TURN_MODEL_PATH": "/turn.onnx"}
+                if tts != "openai":
+                    env.update({"S2S_TTS_REF_AUDIO": "/ref.wav", "S2S_TTS_REF_TEXT": "参考文字"})
                 self.assertFalse(set(self.launcher.pipeline_config("gpu", env)) - fields)
 
     def test_demo_start_failure_stops_backend_and_removes_config(self):
@@ -385,11 +454,15 @@ class LauncherTests(unittest.TestCase):
                  patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-value"}):
                 with self.assertRaisesRegex(OSError, "demo failed"):
                     self.launcher.supervise(Path(folder) / "bin/python", {"port": 8765}, True,
-                                            runtime_env={"DEEPSEEK_API_KEY": "test-value", "LD_LIBRARY_PATH": "/venv/nvidia/cudnn/lib"})
+                                            runtime_env={"DEEPSEEK_API_KEY": "test-value", "LD_LIBRARY_PATH": "/venv/nvidia/cudnn/lib",
+                                                         "S2S_STT_API_KEY": "asr-canary", "S2S_TTS_API_KEY": "tts-canary", "LLM_API_KEY": "llm-canary"})
                 backend.terminate.assert_called_once()
                 calls = self.launcher.subprocess.Popen.call_args_list
                 self.assertEqual(calls[0].kwargs["env"]["LD_LIBRARY_PATH"], "/venv/nvidia/cudnn/lib")
                 self.assertNotIn("DEEPSEEK_API_KEY", calls[1].kwargs["env"])
+                self.assertEqual(calls[0].kwargs["env"]["S2S_STT_API_KEY"], "asr-canary")
+                for key in ("S2S_STT_API_KEY", "S2S_TTS_API_KEY", "LLM_API_KEY"):
+                    self.assertNotIn(key, calls[1].kwargs["env"])
                 self.assertEqual(calls[1].kwargs["env"]["S2S_DEMO_VOICE"], "")
                 self.assertFalse((Path(folder) / ".runtime/bailian.json").exists())
 

@@ -980,6 +980,9 @@ class StatefulStreamingSTTHandler(BaseSTTHandler):
             audio_sample_rate=audio_sample_rate,
         )
         normalized_endpoint = urlsplit(endpoint_url)._replace(query="", fragment="").geturl()
+        from speech_to_speech.utils.speech_credentials import resolve_speech_api_key
+
+        api_key = resolve_speech_api_key(api_key, "S2S_STT_API_KEY")
         if api_key is None and normalized_endpoint == f"{OPENAI_REALTIME_BASE_URL}/realtime":
             api_key = os.getenv("OPENAI_API_KEY")
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}

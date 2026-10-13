@@ -244,7 +244,9 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
 
         self.base_url = base_url.rstrip("/")
         self.endpoint_url = f"{self.base_url}/audio/transcriptions"
-        self.api_key = api_key
+        from speech_to_speech.utils.speech_credentials import resolve_speech_api_key
+
+        self.api_key = resolve_speech_api_key(api_key, "S2S_STT_API_KEY")
         if self.api_key is None and self.base_url == OPENAI_BASE_URL:
             self.api_key = os.getenv("OPENAI_API_KEY")
         self.model = model

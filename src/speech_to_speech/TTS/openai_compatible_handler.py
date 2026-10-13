@@ -398,6 +398,9 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.should_listen = should_listen
         self.base_url = base_url.rstrip("/")
         self.endpoint_url = f"{self.base_url}/audio/speech"
+        from speech_to_speech.utils.speech_credentials import resolve_speech_api_key
+
+        api_key = resolve_speech_api_key(api_key, "S2S_TTS_API_KEY")
         self.api_key = api_key if api_key is not None else os.getenv("OPENAI_API_KEY")
         self.model = model
         self.voice = voice

@@ -86,11 +86,11 @@ bash run.sh --check-api
 
 | 环节 | 环境变量 | 本启动器支持的选择 |
 |---|---|---|
-| 识别后端 | `S2S_STT_BACKEND` | `auto`、`qwen3-asr`、`faster-whisper`、`whisper` |
+| 识别后端 | `S2S_STT_BACKEND` | `auto`、`qwen3-asr`、`faster-whisper`、`whisper`、远程 `openai` / `vllm-realtime` |
 | 识别模型 | `S2S_STT_MODEL` | 对应后端的 Hub 模型 ID 或本地目录；Faster Whisper 也接受 `small` 等名称 |
 | 识别语言/精度 | `S2S_STT_LANGUAGE`、`S2S_STT_DTYPE` | 语言默认 `zh`；Torch 精度默认 GPU float16 / CPU float32 |
 | Faster Whisper 精度 | `S2S_STT_COMPUTE_TYPE` | 默认 GPU float16 / CPU int8，不使用 Torch dtype 参数 |
-| 合成后端 | `S2S_TTS_BACKEND` | `auto`、`qwen3`（GPU）、`omnivoice`（GPU/CPU） |
+| 合成后端 | `S2S_TTS_BACKEND` | `auto`、`qwen3`（GPU）、`omnivoice`（GPU/CPU）、远程 `openai` |
 | 合成模型 | `S2S_TTS_MODEL` | 对应架构的 Hub 模型 ID 或本地目录 |
 | 合成语言/精度 | `S2S_TTS_LANGUAGE`、`S2S_TTS_DTYPE` | 默认中文；GPU float16 / CPU float32 |
 | 预设音色 | `S2S_TTS_VOICE` | Qwen CustomVoice 默认 Vivian；OmniVoice 留空 |
@@ -99,7 +99,7 @@ bash run.sh --check-api
 | Silero 权重 | `S2S_SILERO_MODEL_PATH` | 留空用包内权重；可指定兼容的本地 TorchScript 文件 |
 | 说完判断 | `S2S_SMART_TURN`、`S2S_SMART_TURN_MODEL_PATH` | `1` 启用、`0` 关闭；路径留空用 Smart Turn v3.2 镜像模型，否则指定兼容 CPU ONNX |
 | 降噪 | `S2S_AUDIO_ENHANCEMENT`、`S2S_DEEPFILTER_MODEL_PATH` | `0/1` 控制开关；路径留空用包内模型，也可指定兼容 Rust 运行时的 `.tar.gz` 模型 |
-| LLM | `S2S_LLM_PROVIDER` 和对应的 `DEEPSEEK_*` / `DASHSCOPE_*` | 与前述 Key 配置相同，修改模型名和地址后重启 |
+| LLM | `S2S_LLM_PROVIDER` 和对应的 `DEEPSEEK_*` / `DASHSCOPE_*` / `LLM_*` | DeepSeek、百炼，或 `openai-compatible` 自建服务 |
 | 系统提示词 | `S2S_SYSTEM_PROMPT` | 自定义助手角色与回答要求 |
 
 `auto` 保留原来的 GPU/CPU 组合；模型、音色、精度字段留空时使用所选后端的默认值。`--gpu/--cpu` 选择运行设备和 venv，不覆盖显式选择的后端。切换到 Faster Whisper、OmniVoice 或 FireRed 时，会根据选定后端自动安装额外依赖；只更换相同后端的模型不会强制重装依赖。依赖留在原 venv 中以便切回，不会自动卸载。
@@ -140,6 +140,61 @@ PYTHON_BIN=/usr/bin/python3.11 bash run.sh --gpu
 网页刷新时会读取本次部署配置的 Qwen 音色和系统提示词，优先于浏览器之前保存的值；之后仍可在网页 Settings 中临时调整。独立运行网页服务时，需自行传入 `S2S_DEMO_VOICE` 和 `S2S_DEMO_INSTRUCTIONS` 才会使用同样的覆盖行为。Hub 模型下载仍走 `HF_ENDPOINT`，本地路径不下载；Silero/DeepFilterNet 留空默认使用随包权重。
 
 新增后端组合和自定义权重仍需在目标服务器验证；配置校验只确认选项及字段，不保证任意模型的语言、音色、许可证或硬件需求相同。
+
+### 连接独立 vLLM / vLLM-Omni 服务
+
+模型服务需要提前部署并启动，本脚本不安装或启动 vLLM。后端名 `openai` 表示兼容接口协议，可以连接自建服务。修改现有 `.env`，保留已配置的 DeepSeek Key：
+
+```dotenv
+S2S_PROFILE=cpu
+S2S_STT_BACKEND=openai
+S2S_STT_BASE_URL=http://你的ASR服务器:8000/v1
+S2S_STT_MODEL=Qwen/Qwen3-ASR-1.7B
+S2S_STT_API_KEY=
+S2S_STT_LANGUAGE=zh
+S2S_STT_TIMEOUT=60
+
+S2S_TTS_BACKEND=openai
+S2S_TTS_BASE_URL=http://你的TTS服务器:8091/v1
+S2S_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+S2S_TTS_API_KEY=
+S2S_TTS_VOICE=Vivian
+S2S_TTS_LANGUAGE=Chinese
+S2S_TTS_TASK_TYPE=CustomVoice
+S2S_TTS_RESPONSE_FORMAT=pcm
+S2S_TTS_SAMPLE_RATE=24000
+S2S_TTS_STREAM=0
+S2S_TTS_SPEED=1
+S2S_TTS_REF_AUDIO=
+S2S_TTS_REF_TEXT=
+```
+
+地址填写服务基础地址，通常含 `/v1`，不含 `/audio/transcriptions`、`/audio/speech` 或 `/realtime`；模型字段填写服务器实际暴露的名称（包括自定义 `--served-model-name`）。这些模型不会再下载到本项目所在机器，远程服务负责模型加载。ASR/TTS 的 Key 独立，留空表示无鉴权，不会沿用 DeepSeek/LLM Key；Key 只在环境变量中传给语音后端，不进入配置 JSON 或网页进程。
+
+普通 ASR 使用 `POST /audio/transcriptions`，发送 WAV 片段并接收 `json` 或 `text`。需要实时识别时，把 `S2S_STT_BACKEND` 改为 `vllm-realtime`，地址可以用 `ws://服务器:8000/v1`（也接受 HTTP 基础地址），固定发送 16kHz PCM。服务必须支持对应的 vLLM Realtime 协议与模型；普通 HTTP 转写可用不代表实时接口可用。`S2S_STT_CONNECT_TIMEOUT` 控制实时连接等待，`S2S_STT_TIMEOUT` 控制最终转写等待；当前 vLLM 实时协议适配不发送语言提示。
+
+远程 TTS 支持 PCM 或 WAV。PCM 的 `S2S_TTS_SAMPLE_RATE` 必须匹配服务器输出，通常 Qwen3-TTS 为 24000。`S2S_TTS_STREAM=1` 是 vLLM-Omni 扩展，只能与 `pcm` 和 `S2S_TTS_SPEED=1` 一起用，其他兼容服务应保持 `0`。`S2S_TTS_TASK_TYPE`、语言和风格指令均为可选扩展，普通服务不接受时应留空。远程参考音频克隆字段尚未接入；使用 Base 模型若服务需要参考音频，还需进一步扩展请求参数。网页会同步远程 TTS 配置的音色。
+
+如果 LLM 也部署在自己的 vLLM 服务，再修改：
+
+```dotenv
+S2S_LLM_PROVIDER=openai-compatible
+LLM_BASE_URL=http://你的LLM服务器:8002/v1
+LLM_MODEL=服务实际暴露的模型名
+LLM_API_KEY=
+LLM_REASONING_EFFORT=
+```
+
+自建 LLM 支持 HTTP/HTTPS，Key 可选；DeepSeek、百炼依然要求 HTTPS 和各自的 Key。`LLM_REASONING_EFFORT` 留空不发送该参数，只在服务支持时填写。`--check-api` 检查所选 LLM；HTTP ASR/TTS 在后端初始化时由已有处理器检查和预热，vLLM Realtime 在实际接收音频时建立连接，需通过说话测试确认。
+
+```bash
+bash run.sh --cpu --dry-run
+PYTHON_BIN=/usr/bin/python3.11 bash run.sh --cpu
+```
+
+ASR/TTS 都为远程时，启动器跳过本地 CUDA 预热；CPU profile 只控制本项目所在机器的依赖和本地组件，不决定远程服务用哪个 GPU。仍会运行本地 VAD、Smart Turn 和可选降噪，并保留它们所需的 PyTorch 等依赖。仅一个语音阶段为远程时，另一个阶段仍按 profile 在本地运行。
+
+本次验证包含配置与认证回归测试，不包含实际 vLLM/vLLM-Omni 服务的端到端调用；需要以目标服务协议版本及实际音频输出验证。
 
 **48GB NVIDIA GPU：**
 

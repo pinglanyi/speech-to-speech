@@ -1,4 +1,4 @@
-"""Ubuntu venv bootstrap, DeepSeek/Bailian preflight, and browser demo.
+"""Ubuntu venv bootstrap, local/remote speech, LLM preflight, and browser demo.
 
 Uses only the standard library until the isolated environment is ready.
 Credentials remain in environment variables and never enter CLI arguments.
@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -18,6 +19,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 import venv
 from pathlib import Path
 
@@ -105,15 +107,41 @@ def provider_settings(env: dict[str, str]) -> dict:
             "model": env.get("DASHSCOPE_MODEL", "qwen-plus"),
             "reasoning_effort": None,
         }
-    raise ValueError("S2S_LLM_PROVIDER must be deepseek or bailian; see .env.example.")
+    if provider == "openai-compatible":
+        model = env.get("LLM_MODEL", "").strip()
+        if not model:
+            raise ValueError("Set LLM_MODEL to the model name served by your vLLM/compatible endpoint.")
+        return {
+            "name": "OpenAI-compatible", "key_env": "LLM_API_KEY", "optional_auth": True,
+            "base_url": service_base_url("LLM_BASE_URL", env.get("LLM_BASE_URL", "").strip() or "http://localhost:8002/v1"),
+            "model": model, "reasoning_effort": env.get("LLM_REASONING_EFFORT", "").strip() or None,
+        }
+    raise ValueError("S2S_LLM_PROVIDER must be deepseek, bailian, or openai-compatible; see .env.example.")
 
 
 def require_key(env: dict[str, str]) -> str:
     settings = provider_settings(env)
     key = env.get(settings["key_env"], "").strip()
+    if not key and settings.get("optional_auth"):
+        return "none"  # The OpenAI client requires a nonempty key even for an unauthenticated server.
     if not key:
         raise ValueError(f"Set {settings['key_env']} in .env or export it before starting; see .env.example.")
     return key
+
+
+def service_base_url(name: str, url: str, *, realtime: bool = False) -> str:
+    try:
+        parts = urlsplit(url)
+        schemes = ("http", "https", "ws", "wss") if realtime else ("http", "https")
+        valid = (parts.scheme in schemes and parts.hostname and not parts.username
+                 and not parts.password and not parts.query and not parts.fragment)
+        valid = valid and not parts.path.rstrip("/").endswith(("/audio/transcriptions", "/audio/speech", "/realtime", "/chat/completions"))
+        _ = parts.port
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError(f"{name} must be a service base URL such as http://localhost:8000/v1, without credentials or an endpoint suffix.")
+    return url.rstrip("/")
 
 
 def pipeline_config(profile: str, env: dict[str, str]) -> dict:
@@ -130,16 +158,25 @@ def pipeline_config(profile: str, env: dict[str, str]) -> dict:
             raise ValueError(f"{name} must be 0 (off) or 1 (on).")
         return setting == "1"
 
+    def positive(name, default, integer=False):
+        try:
+            setting = (int if integer else float)(value(name, str(default)))
+            if setting <= 0 or not math.isfinite(setting):
+                raise ValueError
+        except (ValueError, OverflowError):
+            raise ValueError(f"{name} must be a positive {'integer' if integer else 'number'}.") from None
+        return setting
+
     device = "cuda" if profile == "gpu" else "cpu"
     dtype = "float16" if profile == "gpu" else "float32"
     stt = value("S2S_STT_BACKEND", "auto")
     tts = value("S2S_TTS_BACKEND", "auto")
     stt = ("qwen3-asr" if profile == "gpu" else "faster-whisper") if stt == "auto" else stt
     tts = ("qwen3" if profile == "gpu" else "omnivoice") if tts == "auto" else tts
-    if stt not in ("qwen3-asr", "faster-whisper", "whisper"):
-        raise ValueError("S2S_STT_BACKEND must be auto, qwen3-asr, faster-whisper, or whisper.")
-    if tts not in ("qwen3", "omnivoice"):
-        raise ValueError("S2S_TTS_BACKEND must be auto, qwen3, or omnivoice.")
+    if stt not in ("qwen3-asr", "faster-whisper", "whisper", "openai", "vllm-realtime"):
+        raise ValueError("S2S_STT_BACKEND must be auto, qwen3-asr, faster-whisper, whisper, openai, or vllm-realtime.")
+    if tts not in ("qwen3", "omnivoice", "openai"):
+        raise ValueError("S2S_TTS_BACKEND must be auto, qwen3, omnivoice, or openai.")
     if tts == "qwen3" and profile == "cpu":
         raise ValueError("S2S_TTS_BACKEND=qwen3 requires --gpu with this launcher; use omnivoice for CPU.")
     config = {
@@ -188,12 +225,30 @@ def pipeline_config(profile: str, env: dict[str, str]) -> dict:
             "faster_whisper_stt_compute_type": value("S2S_STT_COMPUTE_TYPE", "float16" if profile == "gpu" else "int8"),
             "faster_whisper_stt_gen_language": value("S2S_STT_LANGUAGE", "zh"),
         })
-    else:
+    elif stt == "whisper":
         config.update({
             "stt_device": device, "stt_torch_dtype": stt_dtype,
             "stt_model_name": value("S2S_STT_MODEL", "openai/whisper-small"),
             "language": value("S2S_STT_LANGUAGE", "zh"),
         })
+    else:
+        realtime = stt == "vllm-realtime"
+        prefix = "vllm_realtime_stt" if realtime else "openai_stt"
+        config.update({
+            prefix + "_base_url": service_base_url("S2S_STT_BASE_URL", value("S2S_STT_BASE_URL", "ws://localhost:8000/v1" if realtime else "http://localhost:8000/v1"), realtime=realtime),
+            prefix + "_model": value("S2S_STT_MODEL", "Qwen/Qwen3-ASR-1.7B"),
+        })
+        if realtime:
+            config.update({prefix + "_audio_sample_rate": 16000,
+                           prefix + "_connect_timeout": positive("S2S_STT_CONNECT_TIMEOUT", 10),
+                           prefix + "_final_timeout": positive("S2S_STT_TIMEOUT", 60)})
+        else:
+            response_format = value("S2S_STT_RESPONSE_FORMAT", "json")
+            if response_format not in ("json", "text"):
+                raise ValueError("S2S_STT_RESPONSE_FORMAT must be json or text.")
+            config.update({"openai_stt_language": value("S2S_STT_LANGUAGE", "zh"),
+                           "openai_stt_response_format": response_format,
+                           "openai_stt_timeout": positive("S2S_STT_TIMEOUT", 60)})
     if tts == "qwen3":
         config.update({
             "qwen3_tts_device": device,
@@ -203,7 +258,7 @@ def pipeline_config(profile: str, env: dict[str, str]) -> dict:
             "qwen3_tts_language": value("S2S_TTS_LANGUAGE", "chinese"),
             "qwen3_tts_speaker": value("S2S_TTS_VOICE", "Vivian"),
         })
-    else:
+    elif tts == "omnivoice":
         if value("S2S_TTS_VOICE", ""):
             raise ValueError("OmniVoice has no preset S2S_TTS_VOICE; leave it empty and use reference audio or instructions.")
         config.update({
@@ -211,11 +266,37 @@ def pipeline_config(profile: str, env: dict[str, str]) -> dict:
             "omnivoice_device": device, "omnivoice_dtype": tts_dtype,
             "omnivoice_language": value("S2S_TTS_LANGUAGE", "Chinese"),
         })
-    prefix = "qwen3_tts" if tts == "qwen3" else "omnivoice"
-    for suffix in ("ref_audio", "ref_text", "instruct"):
-        setting = value("S2S_TTS_" + suffix.upper(), "")
-        if setting:
-            config[prefix + "_" + suffix] = setting
+    else:
+        response_format = value("S2S_TTS_RESPONSE_FORMAT", "pcm")
+        stream = flag("S2S_TTS_STREAM", "0")
+        speed = positive("S2S_TTS_SPEED", 1)
+        if response_format not in ("pcm", "wav"):
+            raise ValueError("S2S_TTS_RESPONSE_FORMAT must be pcm or wav.")
+        if stream and (response_format != "pcm" or speed != 1):
+            raise ValueError("S2S_TTS_STREAM=1 requires pcm and S2S_TTS_SPEED=1.")
+        if value("S2S_TTS_REF_AUDIO", "") or value("S2S_TTS_REF_TEXT", ""):
+            raise ValueError("Remote TTS reference-audio cloning is not exposed by this adapter; clear S2S_TTS_REF_AUDIO/TEXT.")
+        task_type = value("S2S_TTS_TASK_TYPE", "")
+        if task_type not in ("", "CustomVoice", "VoiceDesign", "Base"):
+            raise ValueError("S2S_TTS_TASK_TYPE must be empty, CustomVoice, VoiceDesign, or Base.")
+        config.update({
+            "openai_tts_base_url": service_base_url("S2S_TTS_BASE_URL", value("S2S_TTS_BASE_URL", "http://localhost:8091/v1")),
+            "openai_tts_model": value("S2S_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"),
+            "openai_tts_voice": value("S2S_TTS_VOICE", "Vivian"),
+            "openai_tts_language": value("S2S_TTS_LANGUAGE", "") or None,
+            "openai_tts_task_type": task_type or None,
+            "openai_tts_instructions": value("S2S_TTS_INSTRUCT", "") or None,
+            "openai_tts_response_format": response_format,
+            "openai_tts_sample_rate": positive("S2S_TTS_SAMPLE_RATE", 24000, integer=True),
+            "openai_tts_speed": speed, "openai_tts_stream": stream,
+            "openai_tts_timeout": positive("S2S_TTS_TIMEOUT", 300),
+        })
+    if tts != "openai":
+        prefix = "qwen3_tts" if tts == "qwen3" else "omnivoice"
+        for suffix in ("ref_audio", "ref_text", "instruct"):
+            setting = value("S2S_TTS_" + suffix.upper(), "")
+            if setting:
+                config[prefix + "_" + suffix] = setting
     if bool(value("S2S_TTS_REF_AUDIO", "")) != bool(value("S2S_TTS_REF_TEXT", "")):
         raise ValueError("Set S2S_TTS_REF_AUDIO and S2S_TTS_REF_TEXT together.")
     if profile == "cpu":
@@ -294,7 +375,7 @@ def check_api(env: dict[str, str]) -> None:
     name = provider["name"]
     key = require_key(env)
     base = provider["base_url"].rstrip("/")
-    if not base.startswith("https://"):
+    if not base.startswith("https://") and not provider.get("optional_auth"):
         raise ValueError(f"{name} base URL must use https://.")
     payload = {"model": provider["model"],
                "messages": [{"role": "user", "content": "请只回复：连接成功"}], "max_tokens": 32}
@@ -331,6 +412,9 @@ def supervise(python: Path, config: dict, demo: bool, runtime_env: dict[str, str
     path.chmod(0o600)
     env = dict(os.environ if runtime_env is None else runtime_env)
     env["OPENAI_API_KEY"] = require_key(env)
+    # Empty speech-service keys mean no authentication, never the LLM key.
+    env.setdefault("S2S_STT_API_KEY", "")
+    env.setdefault("S2S_TTS_API_KEY", "")
     configure_nltk_data(env)
     processes: list[subprocess.Popen] = []
 
@@ -359,10 +443,10 @@ def supervise(python: Path, config: dict, demo: bool, runtime_env: dict[str, str
             demo_env = env.copy()
             demo_env["SPEECH_TO_SPEECH_URL"] = f"ws://localhost:{config['port']}/v1/realtime"
             demo_env["STARTUP_GREETING"] = "请用中文简短地打招呼。"
-            demo_env["S2S_DEMO_VOICE"] = config.get("qwen3_tts_speaker", "")
+            demo_env["S2S_DEMO_VOICE"] = config.get("qwen3_tts_speaker", config.get("openai_tts_voice", ""))
             demo_env["S2S_DEMO_INSTRUCTIONS"] = config.get("init_chat_prompt", "")
             # The browser adapter only needs the public backend URL, not the LLM key.
-            for key in ("DEEPSEEK_API_KEY", "DASHSCOPE_API_KEY", "OPENAI_API_KEY"):
+            for key in ("DEEPSEEK_API_KEY", "DASHSCOPE_API_KEY", "OPENAI_API_KEY", "LLM_API_KEY", "S2S_STT_API_KEY", "S2S_TTS_API_KEY"):
                 demo_env.pop(key, None)
             port = env.get("S2S_DEMO_PORT", "7860")
             processes.append(subprocess.Popen([str(python), "-m", "uvicorn", "--app-dir", "demo", "server:app",
@@ -387,7 +471,7 @@ def supervise(python: Path, config: dict, demo: bool, runtime_env: dict[str, str
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Ubuntu venv launcher: local Chinese speech + DeepSeek/Bailian LLM")
+    parser = argparse.ArgumentParser(description="Ubuntu venv launcher: local/remote speech + DeepSeek/Bailian/compatible LLM")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--gpu", action="store_true", help="NVIDIA profile; default Qwen3-ASR + Qwen3-TTS, configurable in .env")
     group.add_argument("--cpu", action="store_true", help="CPU profile; default Faster Whisper int8 + OmniVoice, configurable in .env")
@@ -438,7 +522,8 @@ def main(argv=None) -> int:
         print("venv installation complete; run bash run.sh again to start.")
         return 0
     runtime_env = dict(os.environ)
-    if profile == "gpu":
+    local_speech = config["stt"] not in ("openai", "vllm-realtime") or config["tts"] != "openai"
+    if profile == "gpu" and local_speech:
         configure_gpu_libraries(python, runtime_env)
         # Exercise cuDNN before loading large models; device detection alone
         # cannot catch missing engine libraries or their CUDA dependencies.
