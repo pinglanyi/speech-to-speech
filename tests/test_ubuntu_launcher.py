@@ -68,6 +68,86 @@ class LauncherTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "S2S_AUDIO_ENHANCEMENT"):
             self.launcher.pipeline_config("gpu", {"S2S_AUDIO_ENHANCEMENT": "typo"})
 
+    def test_env_changes_model_language_voice_and_turn_detector(self):
+        env = {"S2S_STT_MODEL": "/models/asr", "S2S_STT_LANGUAGE": "en",
+               "S2S_TTS_MODEL": "/models/tts", "S2S_TTS_VOICE": "Aiden",
+               "S2S_TTS_LANGUAGE": "english", "S2S_SMART_TURN": "0",
+               "S2S_SMART_TURN_MODEL_PATH": "/models/turn.onnx", "S2S_STT_DTYPE": "bfloat16"}
+        cfg = self.launcher.pipeline_config("gpu", env)
+        self.assertEqual(cfg["qwen3_asr_model_name"], "/models/asr")
+        self.assertEqual(cfg["qwen3_asr_torch_dtype"], "bfloat16")
+        self.assertEqual(cfg["qwen3_asr_language"], "en")
+        self.assertEqual(cfg["qwen3_tts_model_name"], "/models/tts")
+        self.assertEqual(cfg["qwen3_tts_speaker"], "Aiden")
+        self.assertEqual(cfg["qwen3_tts_language"], "english")
+        self.assertFalse(cfg["smart_turn"])
+        self.assertEqual(cfg["smart_turn_model_path"], "/models/turn.onnx")
+
+    def test_gpu_can_select_cpu_defaults_backends_and_installs_their_extras(self):
+        env = {"S2S_STT_BACKEND": "faster-whisper", "S2S_STT_MODEL": "large-v3",
+               "S2S_TTS_BACKEND": "omnivoice", "S2S_TTS_MODEL": "/models/omni"}
+        cfg = self.launcher.pipeline_config("gpu", env)
+        self.assertEqual(cfg["stt"], "faster-whisper")
+        self.assertEqual(cfg["faster_whisper_stt_model_name"], "large-v3")
+        self.assertEqual(cfg["tts"], "omnivoice")
+        self.assertEqual(cfg["omnivoice_model_name"], "/models/omni")
+        self.assertNotIn("qwen3_asr_model_name", cfg)
+        self.assertNotIn("qwen3_tts_speaker", cfg)
+        deps = self.launcher.install_requirements("gpu", cfg)
+        self.assertTrue(any(d.startswith("faster-whisper>=") for d in deps))
+        self.assertTrue(any(d.startswith("omnivoice>=") for d in deps))
+
+    def test_cpu_can_select_qwen_asr_with_float32_and_whisper_fields_are_valid(self):
+        cfg = self.launcher.pipeline_config("cpu", {"S2S_STT_BACKEND": "qwen3-asr"})
+        self.assertEqual(cfg["qwen3_asr_device"], "cpu")
+        self.assertEqual(cfg["qwen3_asr_torch_dtype"], "float32")
+        cfg = self.launcher.pipeline_config("gpu", {"S2S_STT_BACKEND": "whisper", "S2S_STT_MODEL": "openai/whisper-small"})
+        self.assertEqual(cfg["stt_model_name"], "openai/whisper-small")
+        self.assertEqual(cfg["language"], "zh")
+
+    def test_bad_backend_or_cpu_qwen_tts_is_rejected_before_install(self):
+        for env in ({"S2S_STT_BACKEND": "typo"}, {"S2S_TTS_BACKEND": "typo"},
+                    {"S2S_SMART_TURN": "yes"}, {"S2S_TTS_BACKEND": "qwen3"}):
+            with self.subTest(env=env), self.assertRaises(ValueError):
+                self.launcher.pipeline_config("cpu", env)
+
+    def test_example_blank_model_fields_preserve_gpu_and_cpu_presets(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.launcher.load_env(ROOT / ".env.example")
+            gpu = self.launcher.pipeline_config("gpu", dict(os.environ))
+            cpu = self.launcher.pipeline_config("cpu", dict(os.environ))
+        self.assertEqual(gpu["qwen3_asr_model_name"], "Qwen/Qwen3-ASR-1.7B-hf")
+        self.assertEqual(gpu["qwen3_tts_speaker"], "Vivian")
+        self.assertEqual(cpu["faster_whisper_stt_model_name"], "small")
+        self.assertEqual(cpu["omnivoice_dtype"], "float32")
+
+    def test_invalid_precision_and_incomplete_reference_are_rejected(self):
+        for env in ({"S2S_STT_DTYPE": "int8"}, {"S2S_TTS_DTYPE": "typo"},
+                    {"S2S_TTS_REF_AUDIO": "/voice.wav"}, {"S2S_VAD_BACKEND": "typo"}):
+            with self.subTest(env=env), self.assertRaises(ValueError):
+                self.launcher.pipeline_config("gpu", env)
+
+    def test_firered_requires_local_weights_and_installs_its_extra(self):
+        with self.assertRaisesRegex(ValueError, "S2S_FIRERED_MODEL_DIR"):
+            self.launcher.pipeline_config("gpu", {"S2S_VAD_BACKEND": "firered"})
+        cfg = self.launcher.pipeline_config("gpu", {"S2S_VAD_BACKEND": "firered", "S2S_FIRERED_MODEL_DIR": "/models/vad"})
+        self.assertEqual(cfg["vad_firered_model_dir"], "/models/vad")
+        self.assertIn("fireredvad", self.launcher.install_requirements("gpu", cfg))
+
+    def test_silero_local_weight_override_precedes_packaged_weights(self):
+        spec = importlib.util.spec_from_file_location("local_vad_loader", ROOT / "src/speech_to_speech/VAD/model_loader.py")
+        loader = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loader)
+        torch = MagicMock()
+        with tempfile.TemporaryDirectory(dir=ROOT) as folder:
+            path = Path(folder) / "silero.jit"
+            path.touch()
+            with patch.dict(sys.modules, {"torch": torch}), patch.dict(os.environ, {
+                    "S2S_SILERO_MODEL_PATH": str(path), "S2S_PACKAGED_SILERO": "1"}):
+                loader.load_silero_model()
+            torch.jit.load.assert_called_once_with(str(path), map_location="cpu")
+            torch.hub.load.assert_not_called()
+
     def test_python_missing_required_sys_api_stops_before_install(self):
         with patch.object(self.launcher.sys, "platform", "linux"), \
              patch.object(self.launcher.sys, "get_int_max_str_digits", None), \
@@ -285,6 +365,12 @@ class LauncherTests(unittest.TestCase):
                     fields.add(node.target.id)
         for profile in ("gpu", "cpu"):
             self.assertFalse(set(self.launcher.pipeline_config(profile, {})) - fields)
+        for stt in ("qwen3-asr", "faster-whisper", "whisper"):
+            for tts in ("qwen3", "omnivoice"):
+                env = {"S2S_STT_BACKEND": stt, "S2S_TTS_BACKEND": tts,
+                       "S2S_TTS_REF_AUDIO": "/ref.wav", "S2S_TTS_REF_TEXT": "参考文字",
+                       "S2S_TTS_INSTRUCT": "自然说话", "S2S_SMART_TURN_MODEL_PATH": "/turn.onnx"}
+                self.assertFalse(set(self.launcher.pipeline_config("gpu", env)) - fields)
 
     def test_demo_start_failure_stops_backend_and_removes_config(self):
         backend = MagicMock()
@@ -304,6 +390,7 @@ class LauncherTests(unittest.TestCase):
                 calls = self.launcher.subprocess.Popen.call_args_list
                 self.assertEqual(calls[0].kwargs["env"]["LD_LIBRARY_PATH"], "/venv/nvidia/cudnn/lib")
                 self.assertNotIn("DEEPSEEK_API_KEY", calls[1].kwargs["env"])
+                self.assertEqual(calls[1].kwargs["env"]["S2S_DEMO_VOICE"], "")
                 self.assertFalse((Path(folder) / ".runtime/bailian.json").exists())
 
 

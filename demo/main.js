@@ -21,6 +21,7 @@ import { S2sRealtimeClient, normalizePlaybackBufferMs } from "./s2s-realtime-cli
 import { $, truncateError, DEBUG } from "./ui/dom.js";
 import { ChatView } from "./ui/chat.js";
 import { Account } from "./ui/account.js";
+import { applyDeploymentSettings } from "./ui/deployment-settings.js";
 
 const DEFAULT_VOICE = "Vivian";
 const DEFAULT_INSTRUCTIONS = "你是中文语音助手。请用简洁自然的中文回答，通常不超过三句话。";
@@ -898,6 +899,9 @@ async function fetchConfig() {
     const res = await fetch("api/config");
     if (res.ok) {
       const json = await res.json();
+      settings = applyDeploymentSettings(settings, json.sessionDefaults);
+      inputVoice.value = settings.voice;
+      inputInstructions.value = settings.instructions;
       serverSearchKey = !!json.search;
       lbMode = !!json.lb;
       // Lock to LB mode only when the deploy reports a load balancer.

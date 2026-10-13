@@ -217,6 +217,10 @@ def config():
         "rtc": bool(SPEECH_TO_SPEECH_URL),
         "iceServers": RTC_ICE_SERVERS,
         "startupGreeting": STARTUP_GREETING,
+        "sessionDefaults": {
+            "voice": os.environ.get("S2S_DEMO_VOICE", ""),
+            "instructions": os.environ.get("S2S_DEMO_INSTRUCTIONS", ""),
+        },
         "auth": AUTH_ENABLED,
     }
 

@@ -80,6 +80,67 @@ bash run.sh --check-api
 
 ## 3. 一键启动
 
+### 在同一个 .env 切换模型
+
+修改 `.env` 后停止旧进程并重新启动，模型不会在运行中热切换。已有 `.env` 不会被 Git 更新覆盖，按 `.env.example` 添加需要的项目，不要重新复制覆盖 Key。
+
+| 环节 | 环境变量 | 本启动器支持的选择 |
+|---|---|---|
+| 识别后端 | `S2S_STT_BACKEND` | `auto`、`qwen3-asr`、`faster-whisper`、`whisper` |
+| 识别模型 | `S2S_STT_MODEL` | 对应后端的 Hub 模型 ID 或本地目录；Faster Whisper 也接受 `small` 等名称 |
+| 识别语言/精度 | `S2S_STT_LANGUAGE`、`S2S_STT_DTYPE` | 语言默认 `zh`；Torch 精度默认 GPU float16 / CPU float32 |
+| Faster Whisper 精度 | `S2S_STT_COMPUTE_TYPE` | 默认 GPU float16 / CPU int8，不使用 Torch dtype 参数 |
+| 合成后端 | `S2S_TTS_BACKEND` | `auto`、`qwen3`（GPU）、`omnivoice`（GPU/CPU） |
+| 合成模型 | `S2S_TTS_MODEL` | 对应架构的 Hub 模型 ID 或本地目录 |
+| 合成语言/精度 | `S2S_TTS_LANGUAGE`、`S2S_TTS_DTYPE` | 默认中文；GPU float16 / CPU float32 |
+| 预设音色 | `S2S_TTS_VOICE` | Qwen CustomVoice 默认 Vivian；OmniVoice 留空 |
+| 克隆/音色设计 | `S2S_TTS_REF_AUDIO`、`S2S_TTS_REF_TEXT`、`S2S_TTS_INSTRUCT` | 参考音频和文字必须成对设置，且所选模型需要支持对应功能 |
+| VAD | `S2S_VAD_BACKEND` | 默认 `silero`；`firered` 要设置 `S2S_FIRERED_MODEL_DIR` 指向 Stream-VAD 本地权重 |
+| Silero 权重 | `S2S_SILERO_MODEL_PATH` | 留空用包内权重；可指定兼容的本地 TorchScript 文件 |
+| 说完判断 | `S2S_SMART_TURN`、`S2S_SMART_TURN_MODEL_PATH` | `1` 启用、`0` 关闭；路径留空用 Smart Turn v3.2 镜像模型，否则指定兼容 CPU ONNX |
+| 降噪 | `S2S_AUDIO_ENHANCEMENT`、`S2S_DEEPFILTER_MODEL_PATH` | `0/1` 控制开关；路径留空用包内模型，也可指定兼容 Rust 运行时的 `.tar.gz` 模型 |
+| LLM | `S2S_LLM_PROVIDER` 和对应的 `DEEPSEEK_*` / `DASHSCOPE_*` | 与前述 Key 配置相同，修改模型名和地址后重启 |
+| 系统提示词 | `S2S_SYSTEM_PROMPT` | 自定义助手角色与回答要求 |
+
+`auto` 保留原来的 GPU/CPU 组合；模型、音色、精度字段留空时使用所选后端的默认值。`--gpu/--cpu` 选择运行设备和 venv，不覆盖显式选择的后端。切换到 Faster Whisper、OmniVoice 或 FireRed 时，会根据选定后端自动安装额外依赖；只更换相同后端的模型不会强制重装依赖。依赖留在原 venv 中以便切回，不会自动卸载。
+
+例如 GPU 上把识别模型改为 Qwen3-ASR 0.6B，并修改音色：
+
+```dotenv
+S2S_STT_BACKEND=qwen3-asr
+S2S_STT_MODEL=Qwen/Qwen3-ASR-0.6B-hf
+S2S_TTS_BACKEND=qwen3
+S2S_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+S2S_TTS_VOICE=Aiden
+S2S_AUDIO_ENHANCEMENT=1
+S2S_SMART_TURN=1
+```
+
+或者使用 GPU 上的 Faster Whisper + OmniVoice：
+
+```dotenv
+S2S_STT_BACKEND=faster-whisper
+S2S_STT_MODEL=large-v3
+S2S_STT_COMPUTE_TYPE=float16
+S2S_TTS_BACKEND=omnivoice
+S2S_TTS_MODEL=k2-fsa/OmniVoice
+S2S_TTS_VOICE=
+S2S_TTS_LANGUAGE=Chinese
+```
+
+CPU 使用 `bash run.sh --cpu`，并将 `S2S_STT_COMPUTE_TYPE` 留空或设为 `int8`，Torch dtype 留空或设为 `float32`。Qwen3-TTS 的此启动方式只支持 GPU。更换后端时应一起更新或清空上次填写的模型、语言、精度、音色和参考音频字段；不能把 Qwen 权重交给 Whisper 后端加载。其他上游后端暂未接入这些通用环境变量。
+
+先检查解析后的配置，再启动：
+
+```bash
+bash run.sh --gpu --dry-run
+PYTHON_BIN=/usr/bin/python3.11 bash run.sh --gpu
+```
+
+网页刷新时会读取本次部署配置的 Qwen 音色和系统提示词，优先于浏览器之前保存的值；之后仍可在网页 Settings 中临时调整。独立运行网页服务时，需自行传入 `S2S_DEMO_VOICE` 和 `S2S_DEMO_INSTRUCTIONS` 才会使用同样的覆盖行为。Hub 模型下载仍走 `HF_ENDPOINT`，本地路径不下载；Silero/DeepFilterNet 留空默认使用随包权重。
+
+新增后端组合和自定义权重仍需在目标服务器验证；配置校验只确认选项及字段，不保证任意模型的语言、音色、许可证或硬件需求相同。
+
 **48GB NVIDIA GPU：**
 
 ```bash

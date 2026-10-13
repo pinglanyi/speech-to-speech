@@ -54,6 +54,13 @@ class EnhancementTests(unittest.TestCase):
             self.assertEqual(result.size, 0)
             factory.assert_not_called()
 
+    def test_custom_model_path_reaches_native_runtime(self):
+        with patch.object(self.adapter, "DeepFilterNetRealtime", BufferedProcessor):
+            model = self.adapter.DeepFilterEnhancer(48000, model_path="custom-model.tar.gz")
+            self.assertEqual(model.model_path, "custom-model.tar.gz")
+            result = model.enhance(np.ones(480, dtype=np.float32))
+            self.assertEqual(result.size, 480)
+
     def test_native_failure_closes_processor_and_is_not_silenced(self):
         with patch.object(self.adapter, "DeepFilterNetRealtime") as factory:
             factory.return_value.sample_rate = 48000

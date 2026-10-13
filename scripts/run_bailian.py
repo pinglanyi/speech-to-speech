@@ -118,9 +118,30 @@ def require_key(env: dict[str, str]) -> str:
 
 def pipeline_config(profile: str, env: dict[str, str]) -> dict:
     provider = provider_settings(env)
-    enhancement = env.get("S2S_AUDIO_ENHANCEMENT", "0").strip()
-    if enhancement not in ("0", "1"):
-        raise ValueError("S2S_AUDIO_ENHANCEMENT must be 0 (off) or 1 (on).")
+    if profile not in ("gpu", "cpu"):
+        raise ValueError("Profile must be gpu or cpu.")
+
+    def value(name, default):
+        return env.get(name, "").strip() or default
+
+    def flag(name, default):
+        setting = value(name, default)
+        if setting not in ("0", "1"):
+            raise ValueError(f"{name} must be 0 (off) or 1 (on).")
+        return setting == "1"
+
+    device = "cuda" if profile == "gpu" else "cpu"
+    dtype = "float16" if profile == "gpu" else "float32"
+    stt = value("S2S_STT_BACKEND", "auto")
+    tts = value("S2S_TTS_BACKEND", "auto")
+    stt = ("qwen3-asr" if profile == "gpu" else "faster-whisper") if stt == "auto" else stt
+    tts = ("qwen3" if profile == "gpu" else "omnivoice") if tts == "auto" else tts
+    if stt not in ("qwen3-asr", "faster-whisper", "whisper"):
+        raise ValueError("S2S_STT_BACKEND must be auto, qwen3-asr, faster-whisper, or whisper.")
+    if tts not in ("qwen3", "omnivoice"):
+        raise ValueError("S2S_TTS_BACKEND must be auto, qwen3, or omnivoice.")
+    if tts == "qwen3" and profile == "cpu":
+        raise ValueError("S2S_TTS_BACKEND=qwen3 requires --gpu with this launcher; use omnivoice for CPU.")
     config = {
         "host": "127.0.0.1",
         "port": int(env.get("S2S_PORT", "8765")),
@@ -131,37 +152,78 @@ def pipeline_config(profile: str, env: dict[str, str]) -> dict:
         # DeepSeek supports reasoning_effort=none to disable thinking for voice.
         "responses_api_reasoning_effort": provider["reasoning_effort"],
         "responses_api_disable_thinking": False,
-        "init_chat_prompt": "你是中文语音助手。请用简洁自然的中文回答，通常不超过三句话。",
+        "init_chat_prompt": value("S2S_SYSTEM_PROMPT", "你是中文语音助手。请用简洁自然的中文回答，通常不超过三句话。"),
         "stream_batch_sentences": 1,
         "log_transcripts": False,
-        "audio_enhancement": enhancement == "1",
+        "audio_enhancement": flag("S2S_AUDIO_ENHANCEMENT", "0"),
+        "smart_turn": flag("S2S_SMART_TURN", "1"),
+        "device": device, "stt": stt, "tts": tts,
+        "vad": value("S2S_VAD_BACKEND", "silero"),
     }
-    if profile == "gpu":
+    if config["vad"] not in ("silero", "firered"):
+        raise ValueError("S2S_VAD_BACKEND must be silero or firered.")
+    if config["vad"] == "firered":
+        directory = value("S2S_FIRERED_MODEL_DIR", "")
+        if not directory:
+            raise ValueError("S2S_FIRERED_MODEL_DIR is required for the firered VAD backend.")
+        config["vad_firered_model_dir"] = os.path.expanduser(directory)
+    if value("S2S_SMART_TURN_MODEL_PATH", ""):
+        config["smart_turn_model_path"] = os.path.expanduser(env["S2S_SMART_TURN_MODEL_PATH"])
+    stt_dtype = value("S2S_STT_DTYPE", dtype)
+    tts_dtype = value("S2S_TTS_DTYPE", dtype)
+    for name, setting in (("S2S_STT_DTYPE", stt_dtype), ("S2S_TTS_DTYPE", tts_dtype)):
+        if setting not in ("auto", "float16", "bfloat16", "float32"):
+            raise ValueError(f"{name} must be auto, float16, bfloat16, or float32.")
+    if stt == "qwen3-asr":
         config.update({
-            "device": "cuda", "stt": "qwen3-asr",
-            "qwen3_asr_model_name": "Qwen/Qwen3-ASR-1.7B-hf",
-            "qwen3_asr_torch_dtype": "float16",
-            "qwen3_asr_language": "zh", "tts": "qwen3",
-            "qwen3_tts_backend": "torch", "qwen3_tts_language": "chinese",
-            "qwen3_tts_dtype": "float16",
-            "qwen3_tts_speaker": "Vivian",
+            "qwen3_asr_device": device,
+            "qwen3_asr_model_name": value("S2S_STT_MODEL", "Qwen/Qwen3-ASR-1.7B-hf"),
+            "qwen3_asr_torch_dtype": stt_dtype,
+            "qwen3_asr_language": value("S2S_STT_LANGUAGE", "zh"),
         })
-    elif profile == "cpu":
+    elif stt == "faster-whisper":
         config.update({
-            "device": "cpu", "stt": "faster-whisper",
-            "faster_whisper_stt_model_name": "small",
-            "faster_whisper_stt_compute_type": "int8",
-            "faster_whisper_stt_gen_language": "zh", "tts": "omnivoice",
-            "omnivoice_device": "cpu", "omnivoice_dtype": "float32",
-            "omnivoice_language": "Chinese",
-            "enable_live_transcription": False,
+            "faster_whisper_stt_device": device,
+            "faster_whisper_stt_model_name": value("S2S_STT_MODEL", "small"),
+            "faster_whisper_stt_compute_type": value("S2S_STT_COMPUTE_TYPE", "float16" if profile == "gpu" else "int8"),
+            "faster_whisper_stt_gen_language": value("S2S_STT_LANGUAGE", "zh"),
         })
     else:
-        raise ValueError("Profile must be gpu or cpu.")
+        config.update({
+            "stt_device": device, "stt_torch_dtype": stt_dtype,
+            "stt_model_name": value("S2S_STT_MODEL", "openai/whisper-small"),
+            "language": value("S2S_STT_LANGUAGE", "zh"),
+        })
+    if tts == "qwen3":
+        config.update({
+            "qwen3_tts_device": device,
+            "qwen3_tts_model_name": value("S2S_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"),
+            "qwen3_tts_backend": "torch",
+            "qwen3_tts_dtype": tts_dtype,
+            "qwen3_tts_language": value("S2S_TTS_LANGUAGE", "chinese"),
+            "qwen3_tts_speaker": value("S2S_TTS_VOICE", "Vivian"),
+        })
+    else:
+        if value("S2S_TTS_VOICE", ""):
+            raise ValueError("OmniVoice has no preset S2S_TTS_VOICE; leave it empty and use reference audio or instructions.")
+        config.update({
+            "omnivoice_model_name": value("S2S_TTS_MODEL", "k2-fsa/OmniVoice"),
+            "omnivoice_device": device, "omnivoice_dtype": tts_dtype,
+            "omnivoice_language": value("S2S_TTS_LANGUAGE", "Chinese"),
+        })
+    prefix = "qwen3_tts" if tts == "qwen3" else "omnivoice"
+    for suffix in ("ref_audio", "ref_text", "instruct"):
+        setting = value("S2S_TTS_" + suffix.upper(), "")
+        if setting:
+            config[prefix + "_" + suffix] = setting
+    if bool(value("S2S_TTS_REF_AUDIO", "")) != bool(value("S2S_TTS_REF_TEXT", "")):
+        raise ValueError("Set S2S_TTS_REF_AUDIO and S2S_TTS_REF_TEXT together.")
+    if profile == "cpu":
+        config["enable_live_transcription"] = False
     return config
 
 
-def install_requirements(profile: str) -> list[str]:
+def install_requirements(profile: str, config: dict | None = None) -> list[str]:
     # API checks/help also work on Python 3.10, which has no tomllib.
     # Full installation validates Python 3.11/3.12 before reaching this code.
     import tomllib
@@ -170,8 +232,10 @@ def install_requirements(profile: str) -> list[str]:
     # This launcher deliberately uses the torch backend, avoiding the upstream
     # Linux GGML wheel's glibc 2.39 / CUDA 12.8 requirement on Ubuntu 22.04.
     deps = [dep.replace("faster-qwen3-tts[ggml]", "faster-qwen3-tts") for dep in project["dependencies"]]
-    if profile == "cpu":
-        for extra in ("faster-whisper", "omnivoice"):
+    selected = config if config is not None else pipeline_config(profile, {})
+    for backend in (selected["stt"], selected["tts"], selected["vad"]):
+        extra = {"faster-whisper": "faster-whisper", "omnivoice": "omnivoice", "firered": "fireredvad"}.get(backend)
+        if extra:
             deps.extend(project["optional-dependencies"][extra])
     # Browser HTTP adapter imports auth and limiter (optional HF OAuth).
     deps.append("huggingface-hub[oauth]>=0.34.0")
@@ -185,7 +249,7 @@ def run(command: list[str], **kwargs) -> None:
     subprocess.run(command, check=True, cwd=ROOT, **kwargs)
 
 
-def bootstrap(profile: str, reinstall: bool, demo: bool) -> Path:
+def bootstrap(profile: str, reinstall: bool, demo: bool, config: dict | None = None) -> Path:
     environment = venv_path(profile)
     python = environment / "bin/python"
     if not python.exists():
@@ -202,7 +266,7 @@ def bootstrap(profile: str, reinstall: bool, demo: bool) -> Path:
     validate_runtime(info, environment.name)
     if tuple(info["version"][:2]) != sys.version_info[:2]:
         raise ValueError(f"{environment.name} uses a different Python version; move it aside and rerun to recreate it.")
-    deps = install_requirements(profile)
+    deps = install_requirements(profile, config)
     fingerprint = hashlib.sha256(json.dumps([deps, sys.version_info[:2]]).encode()).hexdigest()
     marker = environment / ".bailian.installed"
     if reinstall or not marker.exists() or marker.read_text() != fingerprint:
@@ -295,6 +359,8 @@ def supervise(python: Path, config: dict, demo: bool, runtime_env: dict[str, str
             demo_env = env.copy()
             demo_env["SPEECH_TO_SPEECH_URL"] = f"ws://localhost:{config['port']}/v1/realtime"
             demo_env["STARTUP_GREETING"] = "请用中文简短地打招呼。"
+            demo_env["S2S_DEMO_VOICE"] = config.get("qwen3_tts_speaker", "")
+            demo_env["S2S_DEMO_INSTRUCTIONS"] = config.get("init_chat_prompt", "")
             # The browser adapter only needs the public backend URL, not the LLM key.
             for key in ("DEEPSEEK_API_KEY", "DASHSCOPE_API_KEY", "OPENAI_API_KEY"):
                 demo_env.pop(key, None)
@@ -323,8 +389,8 @@ def supervise(python: Path, config: dict, demo: bool, runtime_env: dict[str, str
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Ubuntu venv launcher: local Chinese speech + DeepSeek/Bailian LLM")
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--gpu", action="store_true", help="Qwen3-ASR + Qwen3-TTS on NVIDIA")
-    group.add_argument("--cpu", action="store_true", help="Faster Whisper int8 + OmniVoice on CPU (slower)")
+    group.add_argument("--gpu", action="store_true", help="NVIDIA profile; default Qwen3-ASR + Qwen3-TTS, configurable in .env")
+    group.add_argument("--cpu", action="store_true", help="CPU profile; default Faster Whisper int8 + OmniVoice, configurable in .env")
     parser.add_argument("--check-api", action="store_true", help="Check the selected LLM API without installing or loading models")
     parser.add_argument("--install-only", action="store_true", help="Prepare .venv without starting services")
     parser.add_argument("--reinstall", action="store_true", help="Refresh dependencies")
@@ -367,7 +433,7 @@ def main(argv=None) -> int:
         ensure_free(config["port"])
         if demo:
             ensure_free(int(os.environ.get("S2S_DEMO_PORT", "7860")))
-    python = bootstrap(profile, args.reinstall, demo)
+    python = bootstrap(profile, args.reinstall, demo, config=config)
     if args.install_only:
         print("venv installation complete; run bash run.sh again to start.")
         return 0

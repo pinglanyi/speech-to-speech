@@ -17,10 +17,11 @@ HAS_DEEPFILTER = DeepFilterNetRealtime is not None
 
 
 class DeepFilterEnhancer:
-    def __init__(self, sample_rate: int):
+    def __init__(self, sample_rate: int, model_path: str | None = None):
         if sample_rate <= 0:
             raise ValueError("sample_rate must be positive")
         self.sample_rate = sample_rate
+        self.model_path = model_path or None
 
     def enhance(self, audio: np.ndarray) -> np.ndarray:
         audio = np.asarray(audio, dtype=np.float32)
@@ -30,7 +31,7 @@ class DeepFilterEnhancer:
             return audio.copy()
         if DeepFilterNetRealtime is None:
             raise RuntimeError("Install deepfilternet-rs==0.1.1 with bash run.sh before enabling enhancement")
-        processor = DeepFilterNetRealtime(compensate_delay=True, log_level="warn")
+        processor = DeepFilterNetRealtime(model_path=self.model_path, compensate_delay=True, log_level="warn")
         try:
             rate = processor.sample_rate
             factor = gcd(self.sample_rate, rate)

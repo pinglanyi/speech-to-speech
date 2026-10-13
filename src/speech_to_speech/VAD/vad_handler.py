@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -170,8 +171,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self.audio_enhancement = audio_enhancement
         if audio_enhancement:
             if HAS_DEEPFILTER:
-                self.deepfilter_enhancer = DeepFilterEnhancer(self.sample_rate)
-                logger.info("Audio enhancement enabled: DeepFilterNet Rust runtime (CPU, bundled weights)")
+                path = os.environ.get("S2S_DEEPFILTER_MODEL_PATH", "").strip()
+                self.deepfilter_enhancer = DeepFilterEnhancer(self.sample_rate, os.path.expanduser(path) if path else None)
+                logger.info("Audio enhancement enabled: DeepFilterNet Rust runtime (CPU)")
             elif not HAS_DF:
                 logger.error(
                     "Audio enhancement requested but DeepFilterNet is not available. Disabling audio enhancement."
